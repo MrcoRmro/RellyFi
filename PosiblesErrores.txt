@@ -1,0 +1,42 @@
+# REPORTE DE POSIBLES ERRORES Y CONFLICTOS - REPRODUCTOR SDM
+**Archivo analizado:** `app/src/main/java/com/example/tailscalelogin/MainActivity.kt`
+
+Este reporte detalla riesgos técnicos, posibles condiciones de carrera (race conditions) y conflictos funcionales que podrían afectar la estabilidad a largo plazo.
+
+---
+
+## 1. Riesgos de Concurrencia y Sincronización
+
+*   **Race Conditions en `mapPlaylists`:** Aunque se utiliza `Collections.synchronizedMap`, las iteraciones complejas y la manipulación de las listas internas (`MutableList`) no están totalmente protegidas. Si un hilo de sincronización está actualizando el mapa mientras la UI (o el buscador) intenta iterar sobre él para mostrar resultados, puede provocar `ConcurrentModificationException` o estados de interfaz inconsistentes.
+*   **Sincronización `isSyncing`:** El flag `isSyncing` evita ejecuciones simultáneas de `sincronizarConServidor()`, pero si la conexión falla repetidamente, el hilo de red podría quedar bloqueado o retrasado, haciendo que la UI perciba el modo "Offline" como "Online" erróneamente durante unos segundos.
+*   **Lógica de `progressRunnable`:** El hilo que consulta el progreso (`/progress`) se ejecuta independientemente del hilo principal. Si la respuesta del servidor es lenta, el `ValueAnimator` que anima el progreso de las carpetas podría intentar animar un valor que ya cambió o que está siendo sobrescrito por un nuevo hilo, causando saltos visuales.
+
+---
+
+## 2. Gestión de Recursos y Ciclo de Vida
+
+*   **Fugas en `Handler` y `Thread`:** Aunque se llama a `handler.removeCallbacksAndMessages(null)` en `onDestroy()`, cualquier `thread { ... }` que esté ejecutándose en ese momento (ej. descargando una carátula o sincronizando) continuará su ejecución. Si el thread intenta acceder a vistas de la `Activity` ya destruida, podría provocar crasheos silenciosos o `NullPointerException` al intentar manipular `runOnUiThread`.
+*   **Gestión de `MediaPlayer`:** El `MediaPlayer` se libera y recrea frecuentemente. Si `prepareAsync()` es llamado mientras una instancia anterior aún no se ha liberado totalmente, o si el usuario cambia de canción muy rápido, podrían solaparse estados de reproducción, causando que el audio de dos canciones se escuche al mismo tiempo momentáneamente.
+
+---
+
+## 3. Conflictos entre Modos Online/Offline
+
+*   **Intercambio de Contexto:** Al cambiar automáticamente de Online a Offline, se limpia `mapPlaylists`. Si una descarga está en progreso cuando se pierde la conexión, el estado de `WaveFillView` podría quedar bloqueado en un valor parcial que no refleja la realidad del archivo en disco.
+*   **Búsqueda Global:** La búsqueda combina resultados en memoria. Si el usuario está en modo Offline, el buscador trabaja sobre el árbol de archivos local; si vuelve a estar Online sin reiniciar la app, el buscador debe reindexar rápidamente. Existe el riesgo de que el buscador muestre resultados de "Modo Online" cuando realmente ya se está en "Modo Offline", o viceversa.
+
+---
+
+## 4. Estabilidad y UX a Largo Plazo
+
+*   **UI Programática compleja:** Al construir toda la UI con `LinearLayout`, `FrameLayout` y `CoordinatorLayout` anidados dinámicamente, cualquier ajuste de diseño requiere una lógica compleja de `dp()` y `LayoutParams`. A largo plazo, esto hace que el código sea muy difícil de mantener y propenso a errores de diseño en diferentes tamaños de pantalla (ej. tablets o teléfonos con notch).
+*   **Consumo de Memoria:** `VinylDiskView` y otros elementos cargan `Bitmap`s en memoria sin una gestión explícita de caché. Si el usuario navega por muchas canciones o playlists con carátulas grandes, la aplicación sufrirá de `OutOfMemoryError` (OOM). Se requiere implementar una librería de carga de imágenes (como Glide o Coil).
+*   **Escáner QR:** Si la cámara se inicializa varias veces sin un cierre correcto, el sistema Android podría denegar el acceso a la cámara o la aplicación podría quedar bloqueada esperando recursos de hardware.
+
+---
+
+## Recomendaciones Técnicas
+1.  **Migración a Arquitectura MVVM:** Separar la lógica de red/almacenamiento del código de la UI.
+2.  **Uso de Glide/Coil:** Para la gestión de caché de imágenes y evitar OOM.
+3.  **Corrutinas (Kotlin Coroutines):** Reemplazar `thread { ... }` y `Handler` por corrutinas para una mejor gestión de hilos y ciclos de vida, evitando fugas de memoria automáticamente.
+4.  **Base de Datos Local (Room):** Sustituir la gestión en memoria de `mapPlaylists` por una base de datos local para persistencia real y consultas rápidas.

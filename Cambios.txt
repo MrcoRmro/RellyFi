@@ -1,0 +1,13 @@
+# REGISTRO DE CAMBIOS Y OPTIMIZACIONES - REPRODUCTOR SDM
+**Archivo:** `app/src/main/java/com/example/tailscalelogin/MainActivity.kt`
+
+Este archivo documenta las mejoras implementadas para optimizar la experiencia de usuario, estabilidad y rendimiento de la aplicación.
+
+---
+
+### [Implementado]
+*   **Gestión Offline de Playlists:** Implementada funcionalidad para renombrar y borrar playlists en modo offline mediante `File.renameTo()` y `File.deleteRecursively()` directamente sobre el sistema de archivos local (`MusicaOffline`).
+*   **Rediseño de UI (Listas):** Se rediseñaron las secciones de ajustes, eliminando botones opacos tipo "tarjeta" y reemplazándolos por una interfaz limpia de estilo "lista" separada por líneas, mejorando la legibilidad y estética.
+*   **Comando de Instalación:** Para instalar esta versión, es obligatorio utilizar `./gradlew installDebug`.
+
+

@@ -1,0 +1,145 @@
+import re
+import os
+
+path = "app/src/main/java/com/sdm/music/MainViewModel.kt"
+if os.path.exists(path):
+    with open(path, "r") as f:
+        content = f.read()
+
+    # Ubicamos donde empiezan las funciones de descarga y limpiamos todo hacia abajo
+    idx = content.find("fun downloadYtPlaylist")
+    if idx == -1:
+        idx = content.find("fun downloadSingleTrack")
+
+    if idx != -1:
+        clean_content = content[:idx] + """fun downloadYtPlaylist(url: String, playlistName: String, onResult: (Boolean) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val destFolder = java.io.File(getApplication<Application>().getExternalFilesDir(null), "Base-Musica/$playlistName")
+                if (!destFolder.exists()) destFolder.mkdirs()
+                
+                val countReq = com.yausername.youtubedl_android.YoutubeDLRequest(url)
+                countReq.addOption("--flat-playlist")
+                countReq.addOption("--get-id")
+                val countRes = com.yausername.youtubedl_android.YoutubeDL.getInstance().execute(countReq, null, null)
+                val outStr = countRes.out ?: ""
+                // Corrección del split: Usar un string puro con doble backslash
+                val totalItems = outStr.split("\\n").count { it.isNotBlank() }.coerceAtLeast(1)
+                
+                val req = com.yausername.youtubedl_android.YoutubeDLRequest(url)
+                req.addOption("--yes-playlist")
+                req.addOption("-x")
+                req.addOption("--audio-format", "mp3")
+                req.addOption("--embed-thumbnail")
+                req.addOption("--embed-metadata")
+                req.addOption("--ignore-errors")
+                req.addOption("-o", java.io.File(destFolder, "%(title)s.%(ext)s").absolutePath)
+                
+                var currentItem = 1
+                var lastProgress = 0f
+                var isConverting = false
+                var convertTick = 0f
+                
+                com.yausername.youtubedl_android.YoutubeDL.getInstance().execute(request = req, processId = null, callback = { progress, _, line ->
+                    val text = line?.lowercase() ?: ""
+                    
+                    if (progress < lastProgress - 40f) {
+                        currentItem++
+                        isConverting = false
+                        convertTick = 0f
+                    }
+                    lastProgress = progress
+                    
+                    if (text.contains("extractaudio") || text.contains("ffmpeg") || text.contains("thumbnail") || text.contains("metadata")) {
+                        isConverting = true
+                    }
+                    
+                    val safeCurrent = currentItem.coerceAtMost(totalItems)
+                    val p = if (progress < 0f) 0f else (progress / 100f)
+                    
+                    val trackProgress = when {
+                        isConverting -> {
+                            convertTick += 0.015f
+                            0.75f + convertTick.coerceAtMost(0.24f)
+                        }
+                        else -> p * 0.75f
+                    }
+                    
+                    val overallProgress = ((safeCurrent - 1) + trackProgress) / totalItems.toFloat()
+                    
+                    val currentMap = _downloadProgress.value.toMutableMap()
+                    currentMap[playlistName] = overallProgress
+                    _downloadProgress.value = currentMap
+                })
+                
+                loadLocalMusic()
+                val finalMap = _downloadProgress.value.toMutableMap()
+                finalMap.remove(playlistName)
+                _downloadProgress.value = finalMap
+                kotlinx.coroutines.withContext(Dispatchers.Main) { onResult(true) }
+            } catch (e: Exception) {
+                val finalMapErr = _downloadProgress.value.toMutableMap()
+                finalMapErr.remove(playlistName)
+                _downloadProgress.value = finalMapErr
+                kotlinx.coroutines.withContext(Dispatchers.Main) { onResult(false) }
+            }
+        }
+    }
+
+    fun downloadSingleTrack(url: String, playlistName: String, onResult: (Boolean) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val destFolder = java.io.File(getApplication<Application>().getExternalFilesDir(null), "Base-Musica/$playlistName")
+                if (!destFolder.exists()) destFolder.mkdirs()
+                
+                val req = com.yausername.youtubedl_android.YoutubeDLRequest(url)
+                req.addOption("-x")
+                req.addOption("--audio-format", "mp3")
+                req.addOption("--embed-thumbnail")
+                req.addOption("--embed-metadata")
+                req.addOption("-o", java.io.File(destFolder, "%(title)s.%(ext)s").absolutePath)
+                
+                var isConverting = false
+                var convertTick = 0f
+                
+                com.yausername.youtubedl_android.YoutubeDL.getInstance().execute(request = req, processId = null, callback = { progress, _, line ->
+                    val text = line?.lowercase() ?: ""
+                    if (text.contains("extractaudio") || text.contains("ffmpeg") || text.contains("thumbnail") || text.contains("metadata")) {
+                        isConverting = true
+                    }
+                    
+                    val p = if (progress < 0f) 0f else (progress / 100f)
+                    
+                    val finalProgress = when {
+                        isConverting -> {
+                            convertTick += 0.015f
+                            0.75f + convertTick.coerceAtMost(0.24f)
+                        }
+                        else -> p * 0.75f
+                    }
+                    
+                    val currentMap = _downloadProgress.value.toMutableMap()
+                    currentMap[playlistName] = finalProgress
+                    _downloadProgress.value = currentMap
+                })
+                
+                loadLocalMusic()
+                val finalMap = _downloadProgress.value.toMutableMap()
+                finalMap.remove(playlistName)
+                _downloadProgress.value = finalMap
+                kotlinx.coroutines.withContext(Dispatchers.Main) { onResult(true) }
+            } catch (e: Exception) {
+                val finalMapErr = _downloadProgress.value.toMutableMap()
+                finalMapErr.remove(playlistName)
+                _downloadProgress.value = finalMapErr
+                kotlinx.coroutines.withContext(Dispatchers.Main) { onResult(false) }
+            }
+        }
+    }
+}
+"""
+        with open(path, "w") as f:
+            f.write(clean_content)
+        print("✅ Sintaxis del ViewModel reparada.")
+    else:
+        print("❌ No se encontró el bloque en MainViewModel.")
