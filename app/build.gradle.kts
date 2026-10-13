@@ -14,6 +14,9 @@ android {
     compileSdk = 34
 
     defaultConfig {
+        ndk {
+            abiFilters.add("arm64-v8a")
+        }
         applicationId = "com.sdm.music"
         minSdk = 24
         targetSdk = 34
