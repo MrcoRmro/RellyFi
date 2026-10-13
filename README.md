@@ -27,4 +27,4 @@ Originalmente concebida como un cliente que se conectaba a un servidor Python pr
 * **[Feature]** Sistema de auto-actualización del motor de scraping para mantener la app viva ante los cambios de algoritmo de las plataformas de video.
 
 ---
-*Desarrollado en Arch Linux.*
+*Desarrollado en Arch Linux + IA al 100%.*
