@@ -1,6 +1,10 @@
-<?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
-    android:width="108dp" android:height="108dp"
-    android:viewportWidth="108" android:viewportHeight="108">
-    <path android:fillColor="#FFFFFF" android:pathData="M38,36 h12 c5.5,0 10,4.5 10,10 c0,4 -2.5,7.5 -6,9 l8,13 h-7 l-7,-11 h-6 v11 h-4 z M42,40 v8 h7 c3,0 5,-2 5,-4 c0,-2 -2,-4 -5,-4 z M64,36 h16 v4 h-12 v8 h10 v4 h-10 v14 h-4 z" />
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Trazado de alta fidelidad con curvas entrelazadas inspiradas en la imagen -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M31.4,32 C27,32 25,34.5 25,39.2 L25,71.5 C25,76 27.5,78 32,78 L37.2,78 C41.5,78 43,76 43,71.5 L43,59 L46.5,59 C47.5,59 48.5,59.3 49.3,60.2 L57.8,72.4 C59.2,74.5 61,78 65,78 L71.8,78 C76,78 77.2,75.8 75.5,73.1 L67,61.1 C63.5,56.1 63,54.2 65.5,52.2 C71.5,47.4 71.5,35 62,32 C57.5,30.5 43.5,32 31.4,32 Z M43,39 L51,39 C54.5,39 57.2,40.5 57.2,44 C57.2,47.5 54.5,49 51,49 L43,49 Z M69,32 C67,32 65,34 65,36.5 L65,46.5 C65,49 67,50 69,50 L77.5,50 C79.5,50 81,49 81,46.5 L81,43.5 C81,41 79.5,40 77.5,40 L73,40 L73,38 L79,38 C81,38 82.5,36.8 82.5,35 L82.5,35 C82.5,33 81,32 79,32 Z" />
 </vector>
