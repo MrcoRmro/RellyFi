@@ -6,7 +6,11 @@ import android.animation.ValueAnimator
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
+import android.os.IBinder
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.graphics.*
@@ -396,7 +400,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnSearchNav: Button
     private lateinit var btnSettingsNav: Button
 
-    private var mediaPlayer: MediaPlayer? = null
+    private var musicService: MusicPlaybackService? = null
+    private var isServiceBound: Boolean = false
+    private var pendingPlayRequest: Boolean = false
     private var videoMediaPlayer: MediaPlayer? = null
     private var videoSurface: Surface? = null
     private var isTvMode: Boolean = false
@@ -417,8 +423,102 @@ class MainActivity : AppCompatActivity() {
     private var isDynamicThemeEnabled: Boolean = true
     private var savedStaticTheme: ThemeColors? = null
     private val handler = Handler(Looper.getMainLooper())
-    private lateinit var notificationManager: NotificationManager
-    private lateinit var mediaSession: MediaSession
+
+    private val playbackListener = object : MusicPlaybackService.PlaybackListener {
+        override fun onTrackChanged(songPath: String, index: Int, title: String, playlistName: String) {
+            currentIndex = index
+            nombrePlaylistActual = playlistName
+            txtTitle.text = title
+            txtArtist.text = "Playlist: $playlistName"
+
+            if (songPath.startsWith("LIVE_STREAM|")) {
+                val rawTitle = songPath.split("|").getOrNull(2).orEmpty()
+                val estaEnFavs = mapPlaylists["Mi favs"]?.any { it.contains(rawTitle, ignoreCase = true) } == true
+                btnFavRadial.setLikedState(estaEnFavs)
+            } else {
+                btnFavRadial.setLikedState(viewModel.isSongLiked(songPath))
+            }
+
+            if (isTvMode) {
+                loadVideoForCurrentTrack()
+            } else {
+                releaseVideoPlayer()
+            }
+
+            viewModel.triggerFypForSong(songPath, title)
+            if (::queueAdapter.isInitialized) queueAdapter.notifyDataSetChanged()
+        }
+
+        override fun onPlaybackStateChanged(isPlaying: Boolean) {
+            if (isPlaying) {
+                btnPlayPause.setImageResource(android.R.drawable.ic_media_pause)
+                wavySeekBar.isWaving = true
+                imgVinyl.isSpinning = true
+                if (isTvMode && isVideoPrepared) {
+                    try { videoMediaPlayer?.let { vp -> if (!vp.isPlaying) vp.start() } } catch (_: Exception) {}
+                }
+            } else {
+                btnPlayPause.setImageResource(android.R.drawable.ic_media_play)
+                wavySeekBar.isWaving = false
+                imgVinyl.isSpinning = false
+                if (isVideoPrepared) {
+                    try { videoMediaPlayer?.pause() } catch (_: Exception) {}
+                }
+            }
+        }
+
+        override fun onDurationReady(durationMs: Int) {
+            txtTotalTime.text = formatTime(durationMs)
+        }
+
+        override fun onAlbumArtLoaded(bitmap: Bitmap?) {
+            imgVinyl.bitmap = bitmap
+            if (bitmap != null && !isTvMode) {
+                extraerTemaDinamicoDeCaratula(bitmap)
+            }
+        }
+
+        override fun onQueueUpdated(newList: MutableList<String>, currentIndex: Int) {
+            playlistActual = newList
+            this@MainActivity.currentIndex = currentIndex
+            if (::queueAdapter.isInitialized) queueAdapter.updateList(playlistActual)
+        }
+
+        override fun onPlayerStopped() {
+            releaseVideoPlayer()
+            playlistActual.clear()
+            currentIndex = 0
+            nombrePlaylistActual = "General"
+            txtTitle.text = "Selecciona una pista"
+            txtArtist.text = "Lista de Reproduccion"
+            txtCurrentTime.text = "00:00"
+            txtTotalTime.text = "00:00"
+            wavySeekBar.progress = 0f
+            wavySeekBar.isWaving = false
+            imgVinyl.isSpinning = false
+            imgVinyl.bitmap = null
+            btnPlayPause.setImageResource(android.R.drawable.ic_media_play)
+            if (isTvMode) loadVideoForCurrentTrack()
+            if (::queueAdapter.isInitialized) queueAdapter.updateList(playlistActual)
+        }
+    }
+
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            val binder = service as? MusicPlaybackService.LocalBinder ?: return
+            musicService = binder.getService().also { srv ->
+                isServiceBound = true
+                srv.isCrossfadeEnabled = isCrossfadeEnabled
+                srv.isLooping = isLooping
+                srv.setPlaybackListener(playbackListener)
+            }
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            isServiceBound = false
+            musicService = null
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -434,22 +534,9 @@ class MainActivity : AppCompatActivity() {
         viewModel = ViewModelProvider(this)[MainViewModel::class.java]
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) { if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1) }
-        notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) { notificationManager.createNotificationChannel(NotificationChannel("SDM_CHANNEL", "Reproductor SDM", NotificationManager.IMPORTANCE_LOW)) }
-        
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) { window.setDecorFitsSystemWindows(false) } 
         else { window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION }
         window.statusBarColor = Color.TRANSPARENT; window.navigationBarColor = Color.TRANSPARENT
-
-        mediaSession = MediaSession(this, "SDM_SESSION")
-        mediaSession.setCallback(object : MediaSession.Callback() {
-            override fun onPlay() { togglePlayPause() }
-            override fun onPause() { togglePlayPause() }
-            override fun onSkipToNext() { reproducirSiguiente() }
-            override fun onSkipToPrevious() { reproducirAnterior() }
-            override fun onSeekTo(pos: Long) { try { mediaPlayer?.seekTo(pos.toInt()); actualizarNotificacion() } catch(e: Exception) {} }
-        })
-        mediaSession.isActive = true
         prefs = getSharedPreferences("SDM_SESSION", Context.MODE_PRIVATE)
         isCrossfadeEnabled = prefs.getBoolean("CROSSFADE", false)
         isAutoDownloadVideoEnabled = prefs.getBoolean("AUTO_DOWNLOAD_VIDEO", true)
@@ -463,6 +550,7 @@ class MainActivity : AppCompatActivity() {
         crearPantallaReproductor()
         updateUIColors(currentTheme)
         setContentView(mainLayout)
+        actualizarBarraProgreso()
 
         liveVideoThemeController = LiveVideoThemeController(lifecycleScope) { primary, secondary, _, _ ->
             if (isTvMode && isDynamicThemeEnabled && isVideoPrepared) {
@@ -1019,18 +1107,18 @@ class MainActivity : AppCompatActivity() {
         wavySeekBar = WavySeekBar(this).apply { layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 50).apply { setMargins(0, 5, 0, 5) } }
         wavySeekBar.onProgressChanged = { prog, fromUser ->
             if (fromUser) {
-                try {
-                    mediaPlayer?.let {
-                        val targetMs = (prog * it.duration).toInt()
-                        it.seekTo(targetMs)
-                        if (isVideoPrepared) {
+                val dur = musicService?.getDuration() ?: 0
+                if (dur > 0) {
+                    val targetMs = (prog * dur).toInt()
+                    musicService?.seekTo(targetMs)
+                    if (isVideoPrepared) {
+                        try {
                             videoMediaPlayer?.let { vp ->
                                 if (vp.duration > 0) vp.seekTo(targetMs.coerceAtMost(vp.duration))
                             }
-                        }
-                        actualizarNotificacion()
+                        } catch (_: Exception) {}
                     }
-                } catch (e: Exception) {}
+                }
             }
         }
         val timeLayout = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT); setPadding(0, 0, 0, 10) }
@@ -1044,13 +1132,13 @@ class MainActivity : AppCompatActivity() {
         controlsRow1.addView(btnPrev); controlsRow1.addView(btnPlayPause); controlsRow1.addView(btnNext)
 
         val controlsRow2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; setPadding(0, 5, 0, 10) }
-        btnShuffle = Button(this).apply { text = "MEZCLAR"; textSize = 11f; setBackgroundColor(Color.TRANSPARENT); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f); setOnClickListener { if (playlistActual.isNotEmpty()) { resetLoopState(); playlistActual.shuffle(); currentIndex = 0; reproducirCancionActual(); val pulse = ValueAnimator.ofArgb(currentTheme.accentLight, Color.TRANSPARENT); pulse.duration = 400; pulse.addUpdateListener { btnShuffle.setBackgroundColor(it.animatedValue as Int) }; pulse.start(); if(::queueAdapter.isInitialized) queueAdapter.notifyDataSetChanged() } } }
+        btnShuffle = Button(this).apply { text = "MEZCLAR"; textSize = 11f; setBackgroundColor(Color.TRANSPARENT); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f); setOnClickListener { if (playlistActual.isNotEmpty()) { resetLoopState(); musicService?.shuffleQueue() ?: run { musicService?.shuffleQueue() ?: run { playlistActual.shuffle(); currentIndex = 0; reproducirCancionActual() } }; val pulse = ValueAnimator.ofArgb(currentTheme.accentLight, Color.TRANSPARENT); pulse.duration = 400; pulse.addUpdateListener { btnShuffle.setBackgroundColor(it.animatedValue as Int) }; pulse.start() } } }
         btnFavRadial = RadialLikeButton(this).apply { layoutParams = LinearLayout.LayoutParams(0, 120, 1f).apply { setMargins(10,0,10,0) }; onClickAction = { toggleFavCurrentSong() } }
         val wrapLoop = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
         btnLoop = Button(this).apply { text = "REPETIR"; textSize = 11f; setBackgroundColor(Color.TRANSPARENT); setPadding(0,0,0,0) }
         dotLoop = View(this).apply { layoutParams = LinearLayout.LayoutParams(15, 15).apply { setMargins(5,0,0,0) }; background = GradientDrawable().apply { cornerRadius=15f; setColor(Color.TRANSPARENT) } }
         wrapLoop.addView(btnLoop); wrapLoop.addView(dotLoop)
-        btnLoop.setOnClickListener { isLooping = !isLooping; mediaPlayer?.isLooping = isLooping; videoMediaPlayer?.isLooping = isLooping; (dotLoop.background as GradientDrawable).setColor(if (isLooping) currentTheme.accent else Color.TRANSPARENT); dotLoop.invalidate() }
+        btnLoop.setOnClickListener { isLooping = !isLooping; musicService?.isLooping = isLooping; videoMediaPlayer?.isLooping = isLooping; (dotLoop.background as GradientDrawable).setColor(if (isLooping) currentTheme.accent else Color.TRANSPARENT); dotLoop.invalidate() }
 
         controlsRow2.addView(btnShuffle); controlsRow2.addView(btnFavRadial); controlsRow2.addView(wrapLoop)
         
@@ -1134,7 +1222,20 @@ class MainActivity : AppCompatActivity() {
         queueAdapter = QueueAdapter(playlistActual, { currentIndex }, { currentTheme }, { pos -> resetLoopState(); currentIndex = pos; reproducirCancionActual(); queueAdapter.notifyDataSetChanged() }, { vh -> itemTouchHelper.startDrag(vh) }, { isDark -> getGlassDrawable(isDark) }, { path, imgView -> loadCoverListAsync(path, imgView) })
         recyclerViewQueue.adapter = queueAdapter
         val callback = object : ItemTouchHelper.SimpleCallback(ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0) {
-            override fun onMove(r: RecyclerView, vh: RecyclerView.ViewHolder, tgt: RecyclerView.ViewHolder): Boolean { val fP = vh.adapterPosition; val tP = tgt.adapterPosition; if (fP == currentIndex) currentIndex = tP else if (fP < currentIndex && tP >= currentIndex) currentIndex-- else if (fP > currentIndex && tP <= currentIndex) currentIndex++; queueAdapter.onItemMove(fP, tP); return true }
+            override fun onMove(r: RecyclerView, vh: RecyclerView.ViewHolder, tgt: RecyclerView.ViewHolder): Boolean {
+                val fP = vh.adapterPosition
+                val tP = tgt.adapterPosition
+                if (fP == currentIndex) currentIndex = tP
+                else if (fP < currentIndex && tP >= currentIndex) currentIndex--
+                else if (fP > currentIndex && tP <= currentIndex) currentIndex++
+                if (musicService != null) {
+                    musicService?.moveQueueItem(fP, tP)
+                    queueAdapter.notifyItemMoved(fP, tP)
+                } else {
+                    queueAdapter.onItemMove(fP, tP)
+                }
+                return true
+            }
             override fun onSwiped(vh: RecyclerView.ViewHolder, d: Int) {}
             override fun isLongPressDragEnabled(): Boolean = false
             override fun onSelectedChanged(vh: RecyclerView.ViewHolder?, state: Int) { super.onSelectedChanged(vh, state); if (state == ItemTouchHelper.ACTION_STATE_DRAG) { vh?.itemView?.alpha = 0.8f; vh?.itemView?.scaleX = 1.02f; vh?.itemView?.scaleY = 1.02f } }
@@ -1276,7 +1377,7 @@ class MainActivity : AppCompatActivity() {
         txtSettingsHeader = TextView(this).apply { text = "Ajustes del Sistema"; textSize = 22f; setPadding(0, 20, 0, 30); setTypeface(null, Typeface.BOLD) }
         btnCambiarTema = Button(this).apply { text = "Cambiar Tema Visual"; setOnClickListener { mostrarSelectorTemas() }; layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 0, 20) } }
         val txtHeaderPlayback = TextView(this).apply { text = "Ajustes de Reproducción"; textSize = 22f; setPadding(0, 60, 0, 30); setTypeface(null, Typeface.BOLD) }
-        switchCrossfade = Switch(this).apply { text = "Fundido Suave (Fade Out)"; textSize = 16f; isChecked = isCrossfadeEnabled; setPadding(40,40,40,40); setOnCheckedChangeListener { _, isChecked -> isCrossfadeEnabled = isChecked; prefs.edit().putBoolean("CROSSFADE", isChecked).apply() } }
+        switchCrossfade = Switch(this).apply { text = "Fundido Suave (Fade Out)"; textSize = 16f; isChecked = isCrossfadeEnabled; setPadding(40,40,40,40); setOnCheckedChangeListener { _, isChecked -> isCrossfadeEnabled = isChecked; musicService?.isCrossfadeEnabled = isChecked; musicService?.isCrossfadeEnabled = isChecked; prefs.edit().putBoolean("CROSSFADE", isChecked).apply() } }
         btnSleepTimer = Button(this).apply { text = "Temporizador de Apagado"; setOnClickListener { mostrarDialogoSleepTimer() }; layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 20, 0, 20) } }
 
         switchDynamicTheme = Switch(this).apply {
@@ -1491,11 +1592,11 @@ class MainActivity : AppCompatActivity() {
                 setOnPreparedListener { vp ->
                     isVideoPrepared = true
                     adjustVideoAspectRatio(tvTextureView.width, tvTextureView.height)
-                    val audioPos = try { mediaPlayer?.currentPosition ?: 0 } catch (_: Exception) { 0 }
+                    val audioPos = musicService?.getCurrentPosition() ?: 0
                     if (audioPos > 0 && vp.duration > 0) {
                         vp.seekTo(audioPos.coerceAtMost((vp.duration - 200).coerceAtLeast(0)))
                     }
-                    if (mediaPlayer?.isPlaying == true) {
+                    if (musicService?.isPlaying() == true) {
                         vp.start()
                     }
                     tvStaticView.fadeOutStatic(380L)
@@ -1644,7 +1745,7 @@ class MainActivity : AppCompatActivity() {
         androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Apagar música en...").setItems(options) { _, w ->
             handler.removeCallbacksAndMessages("SLEEP_TIMER")
             if (w == 0) { Toast.makeText(this, "Temporizador desactivado", Toast.LENGTH_SHORT).show(); return@setItems }
-            val mins = w * 15; handler.postDelayed({ if (mediaPlayer?.isPlaying == true) togglePlayPause(); Toast.makeText(this, "Música apagada", Toast.LENGTH_LONG).show() }, "SLEEP_TIMER", (mins * 60 * 1000).toLong())
+            val mins = w * 15; handler.postDelayed({ if (musicService?.isPlaying() == true) musicService?.pausePlayback(); Toast.makeText(this, "Música apagada", Toast.LENGTH_LONG).show() }, "SLEEP_TIMER", (mins * 60 * 1000).toLong())
             Toast.makeText(this, "La música se pausará en $mins minutos", Toast.LENGTH_SHORT).show()
         }.show()
     }
@@ -1803,6 +1904,7 @@ class MainActivity : AppCompatActivity() {
                         if (nombrePlaylistActual == folderName) {
                             nombrePlaylistActual = nuevo
                             txtArtist.text = "Playlist: $nombrePlaylistActual"
+                            musicService?.updatePlaylistName(folderName, nuevo)
                         }
                     } 
                 } 
@@ -1818,32 +1920,7 @@ class MainActivity : AppCompatActivity() {
                     f.deleteRecursively()
                     viewModel.loadLocalMusic() 
                     
-                    if (nombrePlaylistActual == folderName) {
-                        releaseVideoPlayer()
-                        try {
-                            mediaPlayer?.pause()
-                            mediaPlayer?.release()
-                            mediaPlayer = null
-                        } catch(e: Exception){}
-                        
-                        playlistActual.clear()
-                        currentIndex = 0
-                        nombrePlaylistActual = "General"
-                        
-                        txtTitle.text = "Selecciona una pista"
-                        txtArtist.text = "Lista de Reproduccion"
-                        txtCurrentTime.text = "00:00"
-                        txtTotalTime.text = "00:00"
-                        wavySeekBar.progress = 0f
-                        wavySeekBar.isWaving = false
-                        imgVinyl.isSpinning = false
-                        imgVinyl.bitmap = null
-                        btnPlayPause.setImageResource(android.R.drawable.ic_media_play)
-                        if (isTvMode) loadVideoForCurrentTrack()
-                        
-                        if (::queueAdapter.isInitialized) queueAdapter.updateList(playlistActual)
-                        notificationManager.cancel(1)
-                    }
+                    musicService?.handleDeletedFolder(folderName)
                 } 
             }
             .setNeutralButton("Cancelar", null)
@@ -1869,30 +1946,12 @@ class MainActivity : AppCompatActivity() {
         btnDeleteSelected.setOnClickListener {
             if (selectedSongs.isEmpty()) return@setOnClickListener
             
-            val currentPath = if (playlistActual.isNotEmpty() && currentIndex in playlistActual.indices) playlistActual[currentIndex] else null
-            var wasPlayingDeleted = false
-            
-            for (song in selectedSongs) { 
+            for (song in selectedSongs) {
                 val audioFile = java.io.File(song)
                 java.io.File(getExternalFilesDir(null), "Base-Videos/${audioFile.nameWithoutExtension}.mp4").delete()
-                audioFile.delete() 
-                if (song == currentPath) wasPlayingDeleted = true
-                playlistActual.remove(song)
+                audioFile.delete()
             }
-            
-            if (wasPlayingDeleted) {
-                if (playlistActual.isEmpty()) {
-                    releaseVideoPlayer()
-                    try { mediaPlayer?.pause() } catch(e:Exception){}
-                    currentIndex = 0; txtTitle.text = "Selecciona una pista"; txtArtist.text = "Lista de Reproducción"
-                    if (isTvMode) loadVideoForCurrentTrack()
-                } else {
-                    currentIndex = currentIndex.coerceAtMost(playlistActual.size - 1)
-                    reproducirCancionActual()
-                }
-            } else if (currentPath != null && playlistActual.contains(currentPath)) {
-                currentIndex = playlistActual.indexOf(currentPath)
-            }
+            musicService?.handleDeletedSongs(selectedSongs)
             
             if (::queueAdapter.isInitialized) queueAdapter.updateList(playlistActual)
             isSelectionMode = false; selectedSongs.clear(); btnBackFolder.performClick(); viewModel.loadLocalMusic()
@@ -1915,7 +1974,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun resetLoopState() {
         isLooping = false
-        mediaPlayer?.isLooping = false
+        musicService?.isLooping = false
         videoMediaPlayer?.isLooping = false
         (dotLoop.background as GradientDrawable).setColor(Color.TRANSPARENT)
         dotLoop.invalidate()
@@ -2005,184 +2064,75 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun cargarCaratula(rutaArchivo: String) { 
-        imgVinyl.bitmap = null
-        if (rutaArchivo.startsWith("LIVE_STREAM|")) {
-            val urlImg = rutaArchivo.split("|").getOrNull(3) ?: ""
-            if (urlImg.isNotEmpty()) {
-                lifecycleScope.launch(Dispatchers.IO) {
-                    try {
-                        val conn = URL(urlImg).openConnection() as HttpURLConnection
-                        conn.connectTimeout = 5000; conn.doInput = true; conn.connect()
-                        if (conn.responseCode == 200) { val bmp = BitmapFactory.decodeStream(conn.inputStream); withContext(Dispatchers.Main) { imgVinyl.bitmap = bmp; actualizarNotificacion() }; if (bmp != null && !isTvMode) extraerTemaDinamicoDeCaratula(bmp) }
-                        conn.disconnect()
-                    } catch (e: Exception) {}
-                }
-            }
-            return
-        }
-        lifecycleScope.launch(Dispatchers.IO) { 
-            try { 
-                val mmr = MediaMetadataRetriever()
-                mmr.setDataSource(rutaArchivo)
-                val pic = mmr.embeddedPicture
-                if (pic != null) {
-                    val bmp = BitmapFactory.decodeByteArray(pic, 0, pic.size)
-                    withContext(Dispatchers.Main) { imgVinyl.bitmap = bmp; actualizarNotificacion() }
-                    if (!isTvMode) extraerTemaDinamicoDeCaratula(bmp)
-                } else {
-                    val baseName = File(rutaArchivo).nameWithoutExtension
-                    val dir = File(rutaArchivo).parentFile; val cover = dir?.listFiles()?.firstOrNull { it.name.startsWith(baseName) && (it.name.endsWith(".jpg") || it.name.endsWith(".png")) }
-                    if (cover != null) {
-                        val bmp = BitmapFactory.decodeFile(cover.absolutePath)
-                        withContext(Dispatchers.Main) { imgVinyl.bitmap = bmp; actualizarNotificacion() }
-                        if (bmp != null && !isTvMode) extraerTemaDinamicoDeCaratula(bmp)
-                    }
-                }
-                mmr.release()
-            } catch (e: Exception) { }
-        } 
+    private fun cargarCaratula(rutaArchivo: String) {
+        // Gestionado por MusicPlaybackService via onAlbumArtLoaded
     }
 
     private fun reproducirCancionActual() {
-        if (playlistActual.isEmpty() || currentIndex >= playlistActual.size || currentIndex < 0) return
-        val rutaArchivo = playlistActual[currentIndex]
-
-        if (isTvMode) {
-            loadVideoForCurrentTrack()
-        } else {
-            releaseVideoPlayer()
-        }
-        
-        if (rutaArchivo.startsWith("LIVE_STREAM|")) {
-            val parts = rutaArchivo.split("|")
-            val streamUrl = parts.getOrNull(1) ?: return
-            val rawTitle = parts.getOrNull(2) ?: "Stream"
-            txtTitle.text = rawTitle.replace("_", " ")
-            txtArtist.text = "Playlist: $nombrePlaylistActual"
-            
-            val estaEnFavs = mapPlaylists["Mi favs"]?.any { it.contains(rawTitle, ignoreCase = true) } == true
-            btnFavRadial.setLikedState(estaEnFavs)
-            
-            cargarCaratula(rutaArchivo)
-            viewModel.triggerFypForSong(rutaArchivo, rawTitle.replace("_", " "))
-            
-            try {
-                mediaPlayer?.release()
-                mediaPlayer = MediaPlayer().apply {
-                    setAudioAttributes(AudioAttributes.Builder().setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).setUsage(AudioAttributes.USAGE_MEDIA).build())
-                    setOnErrorListener { _, _, _ -> true }
-                    setDataSource(streamUrl)
-                    prepareAsync()
-                    setOnPreparedListener {
-                        it.start()
-                        if (isTvMode && isVideoPrepared) {
-                            try { videoMediaPlayer?.let { vp -> if (!vp.isPlaying) vp.start() } } catch (_: Exception) {}
-                        }
-                        btnPlayPause.setImageResource(android.R.drawable.ic_media_pause); wavySeekBar.isWaving = true; imgVinyl.isSpinning = true; txtTotalTime.text = formatTime(it.duration); actualizarBarraProgreso(); actualizarNotificacion()
-                    }
-                    setOnCompletionListener { reproducirSiguiente() }
-                }
-            } catch (e: Exception) {}
-            return
-        }
-
-        val nombreCorto = rutaArchivo.substringAfterLast("/")
-        txtTitle.text = nombreCorto.substringBeforeLast(".").replace("_", " "); txtArtist.text = "Playlist: $nombrePlaylistActual"
-        btnFavRadial.setLikedState(viewModel.isSongLiked(rutaArchivo)); cargarCaratula(rutaArchivo)
-        viewModel.triggerFypForSong(rutaArchivo, nombreCorto.substringBeforeLast(".").replace("_", " "))
-        
-        try {
-            mediaPlayer?.release()
-            mediaPlayer = MediaPlayer().apply {
-                setAudioAttributes(AudioAttributes.Builder().setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).setUsage(AudioAttributes.USAGE_MEDIA).build())
-                setOnErrorListener { _, _, _ -> true }
-                setDataSource(rutaArchivo)
-                prepareAsync()
-                setOnPreparedListener {
-                    it.start()
-                    if (isTvMode && isVideoPrepared) {
-                        try { videoMediaPlayer?.let { vp -> if (!vp.isPlaying) vp.start() } } catch (_: Exception) {}
-                    }
-                    btnPlayPause.setImageResource(android.R.drawable.ic_media_pause); wavySeekBar.isWaving = true; imgVinyl.isSpinning = true; txtTotalTime.text = formatTime(it.duration); actualizarBarraProgreso(); actualizarNotificacion()
-                }
-                setOnCompletionListener { reproducirSiguiente() }
+        if (playlistActual.isEmpty() || currentIndex !in playlistActual.indices) return
+        val srv = musicService
+        if (srv != null) {
+            if (srv.playlist !== playlistActual || srv.playlistName != nombrePlaylistActual) {
+                srv.setQueueAndPlay(playlistActual, currentIndex, nombrePlaylistActual)
+            } else {
+                srv.playIndex(currentIndex)
             }
-        } catch (e: Exception) {}
+        } else {
+            pendingPlayRequest = true
+            val intent = Intent(this, MusicPlaybackService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
+            bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
+        }
     }
 
-    private fun actualizarNotificacion() { 
-        if (mediaPlayer == null) return
-        try {
-            val stateBuilder = PlaybackState.Builder().setActions(PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE or PlaybackState.ACTION_SKIP_TO_NEXT or PlaybackState.ACTION_SKIP_TO_PREVIOUS or PlaybackState.ACTION_SEEK_TO)
-            stateBuilder.setState(if (mediaPlayer!!.isPlaying) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED, mediaPlayer!!.currentPosition.toLong(), 1f)
-            mediaSession.setPlaybackState(stateBuilder.build())
-            val metaBuilder = MediaMetadata.Builder().putString(MediaMetadata.METADATA_KEY_TITLE, txtTitle.text.toString()).putString(MediaMetadata.METADATA_KEY_ARTIST, txtArtist.text.toString()).putLong(MediaMetadata.METADATA_KEY_DURATION, mediaPlayer!!.duration.toLong())
-            imgVinyl.bitmap?.let { metaBuilder.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, it) }
-            mediaSession.setMetadata(metaBuilder.build())
-            val notif = Notification.Builder(this, "SDM_CHANNEL").setSmallIcon(android.R.drawable.ic_media_play).setContentTitle(txtTitle.text).setContentText(txtArtist.text).setLargeIcon(imgVinyl.bitmap?.let { Icon.createWithBitmap(it) }).setStyle(Notification.MediaStyle().setMediaSession(mediaSession.sessionToken)).build()
-            notificationManager.notify(1, notif)
-        } catch (e: Exception) {}
+    private fun actualizarNotificacion() {
+        // Delegado a MusicPlaybackService
     }
     
     private fun togglePlayPause() {
-        try {
-            mediaPlayer?.let {
-                if (it.isPlaying) {
-                    it.pause()
-                    if (isVideoPrepared) {
-                        try { videoMediaPlayer?.pause() } catch (_: Exception) {}
-                    }
-                    wavySeekBar.isWaving = false; imgVinyl.isSpinning = false; btnPlayPause.setImageResource(android.R.drawable.ic_media_play)
-                } else {
-                    it.start()
-                    if (isVideoPrepared) {
-                        try { videoMediaPlayer?.start() } catch (_: Exception) {}
-                    }
-                    wavySeekBar.isWaving = true; imgVinyl.isSpinning = true; btnPlayPause.setImageResource(android.R.drawable.ic_media_pause)
-                }
-                actualizarNotificacion()
-            } ?: run { if (playlistActual.isNotEmpty()) reproducirCancionActual() }
-        } catch (e: Exception) {}
+        if (musicService != null) {
+            musicService?.togglePlayPause()
+        } else if (playlistActual.isNotEmpty()) {
+            reproducirCancionActual()
+        }
     }
 
-    private fun reproducirSiguiente() { if (playlistActual.isEmpty()) return; resetLoopState(); currentIndex = (currentIndex + 1) % playlistActual.size; reproducirCancionActual(); if (::queueAdapter.isInitialized) queueAdapter.notifyDataSetChanged() }
+    private fun reproducirSiguiente() {
+        if (playlistActual.isEmpty()) return
+        resetLoopState()
+        musicService?.playNext()
+    }
 
     private fun reproducirAnterior() {
         if (playlistActual.isEmpty()) return
-        try {
-            mediaPlayer?.let {
-                if (it.currentPosition > 3000) {
-                    it.seekTo(0)
-                    if (isVideoPrepared) {
-                        try { videoMediaPlayer?.seekTo(0) } catch (_: Exception) {}
-                    }
-                    actualizarNotificacion()
-                    return
-                }
-            }
-        } catch (e: Exception) {}
-        resetLoopState(); currentIndex = if (currentIndex - 1 < 0) playlistActual.size - 1 else currentIndex - 1; reproducirCancionActual(); if (::queueAdapter.isInitialized) queueAdapter.notifyDataSetChanged()
+        musicService?.playPrevious()
     }
     
     private fun actualizarBarraProgreso() {
         handler.postDelayed(object : Runnable {
             override fun run() {
                 try {
-                    mediaPlayer?.let { 
-                        if (it.isPlaying && it.duration > 0) { 
-                            wavySeekBar.progress = it.currentPosition.toFloat() / it.duration.toFloat(); txtCurrentTime.text = formatTime(it.currentPosition); actualizarNotificacion()
+                    val srv = musicService
+                    if (srv != null && srv.isPlaying()) {
+                        val dur = srv.getDuration()
+                        val pos = srv.getCurrentPosition()
+                        if (dur > 0) {
+                            wavySeekBar.progress = pos.toFloat() / dur.toFloat()
+                            txtCurrentTime.text = formatTime(pos)
                             if (isTvMode && isVideoPrepared) {
                                 videoMediaPlayer?.let { vp ->
-                                    if (vp.isPlaying && vp.duration > 0 && kotlin.math.abs(vp.currentPosition - it.currentPosition) > 650) {
-                                        vp.seekTo(it.currentPosition.coerceAtMost(vp.duration))
+                                    if (vp.isPlaying && vp.duration > 0 && kotlin.math.abs(vp.currentPosition - pos) > 650) {
+                                        vp.seekTo(pos.coerceAtMost(vp.duration))
                                     }
                                 }
                             }
-                            if (isCrossfadeEnabled) { val timeRemaining = it.duration - it.currentPosition; if (timeRemaining in 1..4000) { val volume = timeRemaining / 4000f; it.setVolume(volume, volume) } else { it.setVolume(1f, 1f) } }
-                        } 
+                        }
                     }
-                } catch (e: Exception) {}
+                } catch (_: Exception) {}
                 handler.postDelayed(this, 1000)
             }
         }, 1000)
@@ -2200,12 +2150,26 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        val intent = Intent(this, MusicPlaybackService::class.java)
+        bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        if (isServiceBound) {
+            musicService?.setPlaybackListener(null)
+            unbindService(serviceConnection)
+            isServiceBound = false
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         releaseVideoPlayer()
         try { videoSurface?.release() } catch (_: Exception) {}
         videoSurface = null
-        try { mediaPlayer?.release() } catch (e: Exception) {}
         handler.removeCallbacksAndMessages(null)
     }
 

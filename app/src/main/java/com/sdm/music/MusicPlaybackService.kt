@@ -1,49 +1,722 @@
 package com.sdm.music
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.BroadcastReceiver
+import android.content.Context
 import android.content.Intent
-import androidx.media3.common.AudioAttributes
-import androidx.media3.common.C
-import androidx.media3.common.Player
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.session.MediaSession
-import androidx.media3.session.MediaSessionService
+import android.content.IntentFilter
+import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.drawable.Icon
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
+import android.media.AudioManager
+import android.media.MediaMetadata
+import android.media.MediaMetadataRetriever
+import android.media.MediaPlayer
+import android.media.session.MediaSession
+import android.media.session.PlaybackState
+import android.os.Binder
+import android.os.Build
+import android.os.Handler
+import android.os.IBinder
+import android.os.Looper
+import android.os.PowerManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.Collections
 
-class MusicPlaybackService : MediaSessionService() {
+class MusicPlaybackService : Service() {
 
-    private var mediaSession: MediaSession? = null
+    companion object {
+        const val CHANNEL_ID = "SDM_CHANNEL"
+        const val NOTIFICATION_ID = 101
+        const val ACTION_PREV = "com.sdm.music.ACTION_PREV"
+        const val ACTION_PLAY_PAUSE = "com.sdm.music.ACTION_PLAY_PAUSE"
+        const val ACTION_NEXT = "com.sdm.music.ACTION_NEXT"
+        const val ACTION_STOP = "com.sdm.music.ACTION_STOP"
+    }
+
+    interface PlaybackListener {
+        fun onTrackChanged(songPath: String, index: Int, title: String, playlistName: String)
+        fun onPlaybackStateChanged(isPlaying: Boolean)
+        fun onDurationReady(durationMs: Int)
+        fun onAlbumArtLoaded(bitmap: Bitmap?)
+        fun onQueueUpdated(newList: MutableList<String>, currentIndex: Int)
+        fun onPlayerStopped()
+    }
+
+    inner class LocalBinder : Binder() {
+        fun getService(): MusicPlaybackService = this@MusicPlaybackService
+    }
+
+    private val binder = LocalBinder()
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val handler = Handler(Looper.getMainLooper())
+
+    private var mediaPlayer: MediaPlayer? = null
+    private lateinit var mediaSession: MediaSession
+    private lateinit var notificationManager: NotificationManager
+    private lateinit var audioManager: AudioManager
+    private var audioFocusRequest: AudioFocusRequest? = null
+
+    private var listener: PlaybackListener? = null
+    private var artJob: Job? = null
+
+    var playlist: MutableList<String> = mutableListOf()
+        private set
+    var playlistName: String = "General"
+        private set
+    var currentIndex: Int = 0
+        private set
+    var isLooping: Boolean = false
+        set(value) {
+            field = value
+            try { mediaPlayer?.isLooping = value } catch (_: Exception) {}
+        }
+    var isCrossfadeEnabled: Boolean = false
+
+    var currentTitle: String = "Selecciona una pista"
+        private set
+    var currentArtist: String = "Lista de Reproduccion"
+        private set
+    var currentAlbumArt: Bitmap? = null
+        private set
+    private var isPrepared: Boolean = false
+    private var resumeOnFocusGain: Boolean = false
+    private var noisyReceiverRegistered: Boolean = false
+
+    private val becomingNoisyReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY && isPlaying()) {
+                pausePlayback()
+            }
+        }
+    }
+
+    private val audioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
+        when (focusChange) {
+            AudioManager.AUDIOFOCUS_LOSS -> {
+                resumeOnFocusGain = false
+                pausePlayback()
+            }
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                if (isPlaying()) {
+                    resumeOnFocusGain = true
+                    pausePlayback()
+                }
+            }
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                try { mediaPlayer?.setVolume(0.25f, 0.25f) } catch (_: Exception) {}
+            }
+            AudioManager.AUDIOFOCUS_GAIN -> {
+                try { mediaPlayer?.setVolume(1f, 1f) } catch (_: Exception) {}
+                if (resumeOnFocusGain) {
+                    resumeOnFocusGain = false
+                    resumePlayback()
+                }
+            }
+        }
+    }
+
+    private val crossfadeRunnable = object : Runnable {
+        override fun run() {
+            try {
+                val mp = mediaPlayer
+                if (mp != null && isPrepared && mp.isPlaying && mp.duration > 0) {
+                    if (isCrossfadeEnabled) {
+                        val remaining = mp.duration - mp.currentPosition
+                        if (remaining in 1..4000) {
+                            val vol = (remaining / 4000f).coerceIn(0.05f, 1f)
+                            mp.setVolume(vol, vol)
+                        } else {
+                            mp.setVolume(1f, 1f)
+                        }
+                    } else {
+                        mp.setVolume(1f, 1f)
+                    }
+                }
+            } catch (_: Exception) {}
+            handler.postDelayed(this, 500L)
+        }
+    }
 
     override fun onCreate() {
         super.onCreate()
-        val audioAttributes = AudioAttributes.Builder()
-            .setUsage(C.USAGE_MEDIA)
-            .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
-            .build()
+        notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
-        val player = ExoPlayer.Builder(this)
-            .setAudioAttributes(audioAttributes, true)
-            .setHandleAudioBecomingNoisy(true)
-            .build()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "Reproductor RellyFi",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                setShowBadge(false)
+            }
+            notificationManager.createNotificationChannel(channel)
+        }
 
-        mediaSession = MediaSession.Builder(this, player).build()
+        mediaSession = MediaSession(this, "RELLYFI_MEDIA_SESSION").apply {
+            setCallback(object : MediaSession.Callback() {
+                override fun onPlay() { resumePlayback() }
+                override fun onPause() { pausePlayback() }
+                override fun onSkipToNext() { playNext() }
+                override fun onSkipToPrevious() { playPrevious() }
+                override fun onSeekTo(pos: Long) { seekTo(pos.toInt()) }
+                override fun onStop() { stopAndClear() }
+            })
+            isActive = true
+        }
+
+        handler.post(crossfadeRunnable)
     }
 
-    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? {
-        return mediaSession
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            ACTION_PREV -> playPrevious()
+            ACTION_PLAY_PAUSE -> togglePlayPause()
+            ACTION_NEXT -> playNext()
+            ACTION_STOP -> stopAndClear()
+        }
+        return START_NOT_STICKY
+    }
+
+    override fun onBind(intent: Intent?): IBinder = binder
+
+    fun setPlaybackListener(playbackListener: PlaybackListener?) {
+        this.listener = playbackListener
+        if (playbackListener != null && playlist.isNotEmpty() && currentIndex in playlist.indices) {
+            playbackListener.onQueueUpdated(playlist, currentIndex)
+            playbackListener.onTrackChanged(playlist[currentIndex], currentIndex, currentTitle, playlistName)
+            playbackListener.onAlbumArtLoaded(currentAlbumArt)
+            if (isPrepared) {
+                playbackListener.onDurationReady(getDuration())
+            }
+            playbackListener.onPlaybackStateChanged(isPlaying())
+        }
+    }
+
+    fun isPlaying(): Boolean {
+        return try {
+            isPrepared && (mediaPlayer?.isPlaying == true)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    fun getCurrentPosition(): Int {
+        return try {
+            if (isPrepared) mediaPlayer?.currentPosition ?: 0 else 0
+        } catch (_: Exception) {
+            0
+        }
+    }
+
+    fun getDuration(): Int {
+        return try {
+            if (isPrepared) mediaPlayer?.duration ?: 0 else 0
+        } catch (_: Exception) {
+            0
+        }
+    }
+
+    fun getCurrentSongPath(): String? {
+        return playlist.getOrNull(currentIndex)
+    }
+
+    fun setQueueAndPlay(newList: List<String>, startIndex: Int, folderName: String) {
+        resetLoop()
+        playlist = newList.toMutableList()
+        playlistName = folderName
+        currentIndex = startIndex.coerceIn(0, (playlist.size - 1).coerceAtLeast(0))
+        listener?.onQueueUpdated(playlist, currentIndex)
+        playCurrentTrack()
+    }
+
+    fun playIndex(index: Int) {
+        if (index !in playlist.indices) return
+        resetLoop()
+        currentIndex = index
+        playCurrentTrack()
+    }
+
+    fun shuffleQueue() {
+        if (playlist.isEmpty()) return
+        resetLoop()
+        playlist.shuffle()
+        currentIndex = 0
+        listener?.onQueueUpdated(playlist, currentIndex)
+        playCurrentTrack()
+    }
+
+    fun moveQueueItem(fromPosition: Int, toPosition: Int) {
+        if (fromPosition !in playlist.indices || toPosition !in playlist.indices) return
+        if (fromPosition == currentIndex) {
+            currentIndex = toPosition
+        } else if (fromPosition < currentIndex && toPosition >= currentIndex) {
+            currentIndex--
+        } else if (fromPosition > currentIndex && toPosition <= currentIndex) {
+            currentIndex++
+        }
+        if (fromPosition < toPosition) {
+            for (i in fromPosition until toPosition) Collections.swap(playlist, i, i + 1)
+        } else {
+            for (i in fromPosition downTo toPosition + 1) Collections.swap(playlist, i, i - 1)
+        }
+    }
+
+    fun resetLoop() {
+        isLooping = false
+    }
+
+    fun playCurrentTrack() {
+        if (playlist.isEmpty() || currentIndex !in playlist.indices) return
+        val songPath = playlist[currentIndex]
+
+        val rawTitle = if (songPath.startsWith("LIVE_STREAM|")) {
+            songPath.split("|").getOrNull(2)?.replace("_", " ") ?: "Stream"
+        } else {
+            songPath.substringAfterLast("/").substringBeforeLast(".").replace("_", " ")
+        }
+
+        currentTitle = rawTitle
+        currentArtist = "Playlist: $playlistName"
+        currentAlbumArt = null
+        isPrepared = false
+
+        listener?.onTrackChanged(songPath, currentIndex, currentTitle, playlistName)
+        listener?.onAlbumArtLoaded(null)
+        loadAlbumArtAsync(songPath)
+
+        val dataSource = if (songPath.startsWith("LIVE_STREAM|")) {
+            songPath.split("|").getOrNull(1) ?: return
+        } else {
+            songPath
+        }
+
+        startServiceInForeground()
+
+        try {
+            mediaPlayer?.release()
+            mediaPlayer = MediaPlayer().apply {
+                setWakeMode(applicationContext, PowerManager.PARTIAL_WAKE_LOCK)
+                setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .build()
+                )
+                isLooping = this@MusicPlaybackService.isLooping
+                setOnErrorListener { _, _, _ ->
+                    isPrepared = false
+                    listener?.onPlaybackStateChanged(false)
+                    true
+                }
+                setDataSource(dataSource)
+                setOnPreparedListener { mp ->
+                    isPrepared = true
+                    if (requestAudioFocus()) {
+                        mp.start()
+                        registerNoisyReceiver()
+                    }
+                    listener?.onDurationReady(mp.duration)
+                    listener?.onPlaybackStateChanged(mp.isPlaying)
+                    updateNotification()
+                }
+                setOnCompletionListener {
+                    playNext()
+                }
+                prepareAsync()
+            }
+        } catch (_: Exception) {
+            isPrepared = false
+            listener?.onPlaybackStateChanged(false)
+        }
+    }
+
+    fun togglePlayPause() {
+        val mp = mediaPlayer
+        if (mp != null && isPrepared) {
+            if (mp.isPlaying) {
+                pausePlayback()
+            } else {
+                resumePlayback()
+            }
+        } else if (playlist.isNotEmpty()) {
+            playCurrentTrack()
+        }
+    }
+
+    fun pausePlayback() {
+        try {
+            mediaPlayer?.let {
+                if (it.isPlaying) it.pause()
+            }
+        } catch (_: Exception) {}
+        unregisterNoisyReceiver()
+        listener?.onPlaybackStateChanged(false)
+        updateNotification()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_DETACH)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(false)
+        }
+    }
+
+    fun resumePlayback() {
+        val mp = mediaPlayer ?: return
+        if (!isPrepared) return
+        if (requestAudioFocus()) {
+            try {
+                mp.start()
+                registerNoisyReceiver()
+                startServiceInForeground()
+                listener?.onPlaybackStateChanged(true)
+                updateNotification()
+            } catch (_: Exception) {}
+        }
+    }
+
+    fun playNext() {
+        if (playlist.isEmpty()) return
+        resetLoop()
+        currentIndex = (currentIndex + 1) % playlist.size
+        listener?.onQueueUpdated(playlist, currentIndex)
+        playCurrentTrack()
+    }
+
+    fun playPrevious() {
+        if (playlist.isEmpty()) return
+        if (getCurrentPosition() > 3000) {
+            seekTo(0)
+            return
+        }
+        resetLoop()
+        currentIndex = if (currentIndex - 1 < 0) playlist.size - 1 else currentIndex - 1
+        listener?.onQueueUpdated(playlist, currentIndex)
+        playCurrentTrack()
+    }
+
+    fun seekTo(positionMs: Int) {
+        try {
+            if (isPrepared) {
+                mediaPlayer?.seekTo(positionMs)
+                updateNotification()
+            }
+        } catch (_: Exception) {}
+    }
+
+    fun handleDeletedSongs(deletedPaths: Set<String>) {
+        if (deletedPaths.isEmpty() || playlist.isEmpty()) return
+        val currentPath = getCurrentSongPath()
+        val wasPlayingDeleted = currentPath != null && deletedPaths.contains(currentPath)
+
+        playlist.removeAll(deletedPaths)
+        if (playlist.isEmpty()) {
+            stopAndClear()
+            return
+        }
+
+        if (wasPlayingDeleted) {
+            currentIndex = currentIndex.coerceAtMost(playlist.size - 1)
+            listener?.onQueueUpdated(playlist, currentIndex)
+            playCurrentTrack()
+        } else if (currentPath != null) {
+            val newIdx = playlist.indexOf(currentPath)
+            if (newIdx >= 0) currentIndex = newIdx
+            listener?.onQueueUpdated(playlist, currentIndex)
+        }
+    }
+
+    fun handleDeletedFolder(folderName: String) {
+        if (playlistName == folderName) {
+            stopAndClear()
+        }
+    }
+
+    fun updatePlaylistName(oldName: String, newName: String) {
+        if (playlistName == oldName) {
+            playlistName = newName
+            currentArtist = "Playlist: $newName"
+            getCurrentSongPath()?.let {
+                listener?.onTrackChanged(it, currentIndex, currentTitle, playlistName)
+            }
+            updateNotification()
+        }
+    }
+
+    fun stopAndClear() {
+        isPrepared = false
+        try { mediaPlayer?.stop() } catch (_: Exception) {}
+        try { mediaPlayer?.release() } catch (_: Exception) {}
+        mediaPlayer = null
+        unregisterNoisyReceiver()
+        abandonAudioFocus()
+
+        playlist.clear()
+        currentIndex = 0
+        playlistName = "General"
+        currentTitle = "Selecciona una pista"
+        currentArtist = "Lista de Reproduccion"
+        currentAlbumArt = null
+
+        listener?.onQueueUpdated(playlist, 0)
+        listener?.onPlayerStopped()
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(true)
+        }
+        notificationManager.cancel(NOTIFICATION_ID)
+        stopSelf()
+    }
+
+    private fun startServiceInForeground() {
+        val startIntent = Intent(this, MusicPlaybackService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(startIntent)
+        } else {
+            startService(startIntent)
+        }
+
+        val notification = buildNotification()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+    }
+
+    private fun updateNotification() {
+        if (playlist.isEmpty()) return
+        try {
+            val playing = isPlaying()
+            val stateBuilder = PlaybackState.Builder()
+                .setActions(
+                    PlaybackState.ACTION_PLAY or
+                        PlaybackState.ACTION_PAUSE or
+                        PlaybackState.ACTION_PLAY_PAUSE or
+                        PlaybackState.ACTION_SKIP_TO_NEXT or
+                        PlaybackState.ACTION_SKIP_TO_PREVIOUS or
+                        PlaybackState.ACTION_SEEK_TO or
+                        PlaybackState.ACTION_STOP
+                )
+                .setState(
+                    if (playing) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED,
+                    getCurrentPosition().toLong(),
+                    1f
+                )
+            mediaSession.setPlaybackState(stateBuilder.build())
+
+            val metaBuilder = MediaMetadata.Builder()
+                .putString(MediaMetadata.METADATA_KEY_TITLE, currentTitle)
+                .putString(MediaMetadata.METADATA_KEY_ARTIST, currentArtist)
+                .putLong(MediaMetadata.METADATA_KEY_DURATION, getDuration().toLong())
+            currentAlbumArt?.let { metaBuilder.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, it) }
+            mediaSession.setMetadata(metaBuilder.build())
+
+            notificationManager.notify(NOTIFICATION_ID, buildNotification())
+        } catch (_: Exception) {}
+    }
+
+    private fun buildNotification(): Notification {
+        val openAppIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val contentPendingIntent = PendingIntent.getActivity(
+            this,
+            0,
+            openAppIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val prevPending = PendingIntent.getService(
+            this, 1,
+            Intent(this, MusicPlaybackService::class.java).setAction(ACTION_PREV),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val playPausePending = PendingIntent.getService(
+            this, 2,
+            Intent(this, MusicPlaybackService::class.java).setAction(ACTION_PLAY_PAUSE),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        val nextPending = PendingIntent.getService(
+            this, 3,
+            Intent(this, MusicPlaybackService::class.java).setAction(ACTION_NEXT),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val playing = isPlaying()
+        val playPauseIcon = if (playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
+        val playPauseLabel = if (playing) "Pausar" else "Reproducir"
+
+        val prevAction = Notification.Action.Builder(
+            Icon.createWithResource(this, android.R.drawable.ic_media_previous),
+            "Anterior",
+            prevPending
+        ).build()
+
+        val playPauseAction = Notification.Action.Builder(
+            Icon.createWithResource(this, playPauseIcon),
+            playPauseLabel,
+            playPausePending
+        ).build()
+
+        val nextAction = Notification.Action.Builder(
+            Icon.createWithResource(this, android.R.drawable.ic_media_next),
+            "Siguiente",
+            nextPending
+        ).build()
+
+        return Notification.Builder(this, CHANNEL_ID)
+            .setSmallIcon(android.R.drawable.ic_media_play)
+            .setContentTitle(currentTitle)
+            .setContentText(currentArtist)
+            .setContentIntent(contentPendingIntent)
+            .setOngoing(playing)
+            .setOnlyAlertOnce(true)
+            .setLargeIcon(currentAlbumArt?.let { Icon.createWithBitmap(it) })
+            .addAction(prevAction)
+            .addAction(playPauseAction)
+            .addAction(nextAction)
+            .setStyle(
+                Notification.MediaStyle()
+                    .setMediaSession(mediaSession.sessionToken)
+                    .setShowActionsInCompactView(0, 1, 2)
+            )
+            .build()
+    }
+
+    private fun loadAlbumArtAsync(songPath: String) {
+        artJob?.cancel()
+        artJob = serviceScope.launch(Dispatchers.IO) {
+            var bmp: Bitmap? = null
+            try {
+                if (songPath.startsWith("LIVE_STREAM|")) {
+                    val urlImg = songPath.split("|").getOrNull(3).orEmpty()
+                    if (urlImg.isNotEmpty()) {
+                        val conn = URL(urlImg).openConnection() as HttpURLConnection
+                        conn.connectTimeout = 5000
+                        conn.doInput = true
+                        conn.connect()
+                        if (conn.responseCode == 200) {
+                            bmp = BitmapFactory.decodeStream(conn.inputStream)
+                        }
+                        conn.disconnect()
+                    }
+                } else {
+                    val mmr = MediaMetadataRetriever()
+                    mmr.setDataSource(songPath)
+                    val pic = mmr.embeddedPicture
+                    if (pic != null) {
+                        bmp = BitmapFactory.decodeByteArray(pic, 0, pic.size)
+                    } else {
+                        val baseName = File(songPath).nameWithoutExtension
+                        val dir = File(songPath).parentFile
+                        val cover = dir?.listFiles()?.firstOrNull {
+                            it.name.startsWith(baseName) && (it.name.endsWith(".jpg") || it.name.endsWith(".png"))
+                        }
+                        if (cover != null) {
+                            bmp = BitmapFactory.decodeFile(cover.absolutePath)
+                        }
+                    }
+                    mmr.release()
+                }
+            } catch (_: Exception) {}
+
+            withContext(Dispatchers.Main) {
+                currentAlbumArt = bmp
+                listener?.onAlbumArtLoaded(bmp)
+                updateNotification()
+            }
+        }
+    }
+
+    private fun requestAudioFocus(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val req = audioFocusRequest ?: AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                        .build()
+                )
+                .setOnAudioFocusChangeListener(audioFocusChangeListener)
+                .build()
+                .also { audioFocusRequest = it }
+            audioManager.requestAudioFocus(req) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager.requestAudioFocus(
+                audioFocusChangeListener,
+                AudioManager.STREAM_MUSIC,
+                AudioManager.AUDIOFOCUS_GAIN
+            ) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
+        }
+    }
+
+    private fun abandonAudioFocus() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            audioFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
+        } else {
+            @Suppress("DEPRECATION")
+            audioManager.abandonAudioFocus(audioFocusChangeListener)
+        }
+    }
+
+    private fun registerNoisyReceiver() {
+        if (!noisyReceiverRegistered) {
+            registerReceiver(becomingNoisyReceiver, IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY))
+            noisyReceiverRegistered = true
+        }
+    }
+
+    private fun unregisterNoisyReceiver() {
+        if (noisyReceiverRegistered) {
+            try { unregisterReceiver(becomingNoisyReceiver) } catch (_: Exception) {}
+            noisyReceiverRegistered = false
+        }
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        val player = mediaSession?.player
-        if (player == null || !player.playWhenReady || player.mediaItemCount == 0 || player.playbackState == Player.STATE_ENDED) {
-            stopSelf()
+        super.onTaskRemoved(rootIntent)
+        if (!isPlaying()) {
+            stopAndClear()
         }
     }
 
     override fun onDestroy() {
-        mediaSession?.run {
-            player.release()
-            release()
-            mediaSession = null
-        }
         super.onDestroy()
+        handler.removeCallbacksAndMessages(null)
+        serviceScope.cancel()
+        unregisterNoisyReceiver()
+        abandonAudioFocus()
+        try { mediaPlayer?.release() } catch (_: Exception) {}
+        mediaPlayer = null
+        try {
+            mediaSession.isActive = false
+            mediaSession.release()
+        } catch (_: Exception) {}
     }
 }
