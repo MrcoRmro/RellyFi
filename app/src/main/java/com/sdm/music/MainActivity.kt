@@ -288,8 +288,8 @@ class WavySeekBar(context: Context) : View(context) {
     override fun onDetachedFromWindow() { super.onDetachedFromWindow(); handlerAnim.removeCallbacks(runnable) }
 }
 
-class QueueAdapter(var songs: MutableList<String>, private var currentIndexProvider: () -> Int, private var themeProvider: () -> ThemeColors, private val onItemClick: (Int) -> Unit, private val onStartDrag: (RecyclerView.ViewHolder) -> Unit, private val getGlassDrawable: (Boolean) -> GradientDrawable, private val loadCover: (String, ImageView) -> Unit) : RecyclerView.Adapter<QueueAdapter.QueueViewHolder>() {
-    fun updateList(newList: MutableList<String>) { this.songs = newList; notifyDataSetChanged() }
+class QueueAdapter(var songs: MutableList<String>, private var currentIndexProvider: () -> Int, private var themeProvider: () -> ThemeColors, private val onItemClick: (Int) -> Unit, private val onStartDrag: (RecyclerView.ViewHolder) -> Unit, private val getGlassDrawable: (Boolean) -> GradientDrawable, private val loadCover: (String, ImageView) -> Unit, private val onListUpdated: (List<String>) -> Unit = {}) : RecyclerView.Adapter<QueueAdapter.QueueViewHolder>() {
+    fun updateList(newList: MutableList<String>) { this.songs = newList; onListUpdated(newList); notifyDataSetChanged() }
     class QueueViewHolder(val layout: LinearLayout) : RecyclerView.ViewHolder(layout) { val imgCover: ImageView = layout.getChildAt(0) as ImageView; val txtSongName: TextView = layout.getChildAt(1) as TextView; val txtHandle: TextView = layout.getChildAt(2) as TextView }
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): QueueViewHolder { 
         val row = LinearLayout(parent.context).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(25, 25, 25, 25); layoutParams = RecyclerView.LayoutParams(RecyclerView.LayoutParams.MATCH_PARENT, RecyclerView.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 8, 0, 8) } }
@@ -303,11 +303,11 @@ class QueueAdapter(var songs: MutableList<String>, private var currentIndexProvi
         val path = songs[position]; val theme = themeProvider(); val isCurrent = position == currentIndexProvider()
         holder.imgCover.setImageBitmap(null); holder.imgCover.setBackgroundColor(Color.parseColor(if(theme.isDark) "#2A2A2A" else "#E0E0E0")); loadCover(path, holder.imgCover)
         
-        if (path.startsWith("LIVE_STREAM|")) {
+        if ((path.startsWith("LIVE_STREAM|") || path.startsWith("PENDING_YT|"))) {
             val parts = path.split("|")
             holder.txtSongName.text = parts.getOrNull(2)?.replace("_", " ") ?: "Live Audio"
         } else {
-            holder.txtSongName.text = path.substringAfterLast("/").substringBeforeLast(".").replace("_", " ")
+            holder.txtSongName.text = when { path.startsWith("LIVE_STREAM|") || path.startsWith("PENDING_YT|") -> path.split("|").getOrNull(2)?.replace("_", " ") ?: "Stream"; else -> path.substringAfterLast("/").substringBeforeLast(".") }.replace("_", " ")
         }
         
         holder.txtSongName.applyContrastingText(theme.isDark)
@@ -430,12 +430,13 @@ class MainActivity : AppCompatActivity() {
 
     private val playbackListener = object : MusicPlaybackService.PlaybackListener {
         override fun onTrackChanged(songPath: String, index: Int, title: String, playlistName: String) {
+            resetBarraReproduccionCambioTema()
             currentIndex = index
             nombrePlaylistActual = playlistName
             txtTitle.text = title
             txtArtist.text = "Playlist: $playlistName"
 
-            if (songPath.startsWith("LIVE_STREAM|")) {
+            if (songPath.startsWith("LIVE_STREAM|") || songPath.startsWith("PENDING_YT|")) {
                 val rawTitle = songPath.split("|").getOrNull(2).orEmpty()
                 val estaEnFavs = mapPlaylists["Mi favs"]?.any { it.contains(rawTitle, ignoreCase = true) } == true
                 btnFavRadial.setLikedState(estaEnFavs)
@@ -485,7 +486,7 @@ class MainActivity : AppCompatActivity() {
         override fun onQueueUpdated(newList: MutableList<String>, currentIndex: Int) {
             playlistActual = newList
             this@MainActivity.currentIndex = currentIndex
-            if (::queueAdapter.isInitialized) queueAdapter.updateList(playlistActual)
+            if (::queueAdapter.isInitialized) queueAdapter.updateList(playlistActual) else precargarCaratulasCola(playlistActual)
         }
 
         override fun onPlayerStopped() {
@@ -503,7 +504,7 @@ class MainActivity : AppCompatActivity() {
             imgVinyl.bitmap = null
             btnPlayPause.setImageResource(android.R.drawable.ic_media_play)
             if (isTvMode) loadVideoForCurrentTrack()
-            if (::queueAdapter.isInitialized) queueAdapter.updateList(playlistActual)
+            if (::queueAdapter.isInitialized) queueAdapter.updateList(playlistActual) else precargarCaratulasCola(playlistActual)
         }
     }
 
@@ -628,10 +629,43 @@ class MainActivity : AppCompatActivity() {
         }
 
         lifecycleScope.launch {
+            viewModel.fypHeaderLabel.collect { label ->
+                sectionHome.findViewWithTag<TextView>("FYP_HEADER")?.text = label
+            }
+        }
+        lifecycleScope.launch {
             viewModel.fypRecommendations.collect { recs ->
+                val esModoRadioEnVivo = (nombrePlaylistActual == "Recomendados" || nombrePlaylistActual == "Búsqueda YouTube") &&
+                    playlistActual.any { it.startsWith("LIVE_STREAM|") || it.startsWith("PENDING_YT|") }
+
+                if (esModoRadioEnVivo && recs.isNotEmpty()) {
+                    val nuevosPendientes = recs.mapNotNull { item ->
+                        val vid = item["id"].orEmpty()
+                        val title = item["title"].orEmpty().replace("|", "-").trim()
+                        val thumb = item["thumbnail"].orEmpty()
+                        if (vid.isNotBlank() && title.isNotBlank()) {
+                            "PENDING_YT|$vid|$title|$thumb|https://www.youtube.com/watch?v=$vid"
+                        } else null
+                    }
+                    if (nuevosPendientes.isNotEmpty()) {
+                        val srv = musicService
+                        if (srv != null) {
+                            srv.appendToQueue(nuevosPendientes)
+                        } else {
+                            for (p in nuevosPendientes) {
+                                val vid = p.split("|").getOrNull(1)
+                                if (!vid.isNullOrBlank() && playlistActual.none { it.contains(vid) }) {
+                                    playlistActual.add(p)
+                                }
+                            }
+                            if (::queueAdapter.isInitialized) queueAdapter.updateList(playlistActual) else precargarCaratulasCola(playlistActual)
+                        }
+                    }
+                }
                 fypContainer.removeAllViews()
                 if (recs.isEmpty()) return@collect
                 txtFypHeader.text = "Canciones recomendadas"
+                txtFypHeader.tag = "FYP_HEADER"
                 txtFypHeader.applyContrastingText(currentTheme.isDark)
                 for (item in recs) {
                     val vid = item["id"] ?: ""
@@ -909,7 +943,118 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private val queueThumbMemoryCache = java.util.concurrent.ConcurrentHashMap<String, android.graphics.Bitmap>()
+    private var queuePreloadJob: kotlinx.coroutines.Job? = null
+
+    private fun extractStreamThumbInfo(entry: String): Pair<String, String>? {
+        if (!entry.startsWith("LIVE_STREAM|") && !entry.startsWith("PENDING_YT|")) return null
+        val parts = entry.split("|")
+        val ytUrl = parts.getOrNull(4).orEmpty()
+        val vid = when {
+            entry.startsWith("PENDING_YT|") -> parts.getOrNull(1).orEmpty()
+            else -> ytUrl.substringAfter("v=", "").substringBefore("&")
+        }
+        val rawThumb = parts.getOrNull(3).orEmpty()
+        val thumbUrl = when {
+            rawThumb.startsWith("http://") || rawThumb.startsWith("https://") -> rawThumb
+            vid.isNotBlank() -> "https://i.ytimg.com/vi/$vid/hqdefault.jpg"
+            else -> ""
+        }
+        val key = vid.ifBlank { thumbUrl.hashCode().toString() }
+        if (thumbUrl.isBlank()) return null
+        return Pair(key, thumbUrl)
+    }
+
+    private suspend fun getOrFetchQueueThumbnail(entry: String): android.graphics.Bitmap? = withContext(Dispatchers.IO) {
+        val (key, thumbUrl) = extractStreamThumbInfo(entry) ?: return@withContext null
+        queueThumbMemoryCache[key]?.let { return@withContext it }
+
+        val tempDir = File(cacheDir, "queue_thumbs").apply { mkdirs() }
+        val tempFile = File(tempDir, "$key.jpg")
+
+        if (tempFile.exists() && tempFile.length() > 0L) {
+            android.graphics.BitmapFactory.decodeFile(tempFile.absolutePath)?.let { bmp ->
+                queueThumbMemoryCache[key] = bmp
+                return@withContext bmp
+            }
+        }
+
+        try {
+            val conn = (java.net.URL(thumbUrl).openConnection() as java.net.HttpURLConnection).apply {
+                connectTimeout = 5000
+                readTimeout = 5000
+                doInput = true
+                connect()
+            }
+            val bytes = conn.inputStream.use { it.readBytes() }
+            conn.disconnect()
+            if (bytes.isNotEmpty()) {
+                tempFile.writeBytes(bytes)
+                val bmp = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                if (bmp != null) {
+                    queueThumbMemoryCache[key] = bmp
+                    return@withContext bmp
+                }
+            }
+        } catch (_: Exception) { }
+        null
+    }
+
+    private fun precargarCaratulasCola(lista: List<String>) {
+        val pendientes = lista.mapIndexedNotNull { idx, item ->
+            val info = extractStreamThumbInfo(item)
+            if (info != null && !queueThumbMemoryCache.containsKey(info.first)) idx to item else null
+        }
+        if (pendientes.isEmpty()) return
+
+        queuePreloadJob?.cancel()
+        queuePreloadJob = lifecycleScope.launch(Dispatchers.IO) {
+            val semaforo = kotlinx.coroutines.sync.Semaphore(4)
+            pendientes.forEach { (idx, item) ->
+                launch {
+                    semaforo.acquire()
+                    try {
+                        val bmp = getOrFetchQueueThumbnail(item)
+                        if (bmp != null) {
+                            withContext(Dispatchers.Main) {
+                                if (::queueAdapter.isInitialized && idx < playlistActual.size && playlistActual[idx] == item) {
+                                    queueAdapter.notifyItemChanged(idx)
+                                }
+                            }
+                        }
+                    } finally {
+                        semaforo.release()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun resetBarraReproduccionCambioTema() {
+        try { wavySeekBar.progress = 0f; wavySeekBar.isWaving = false } catch (_: Exception) { }
+        try { txtCurrentTime.text = "00:00" } catch (_: Exception) { }
+        try { txtTotalTime.text = "00:00" } catch (_: Exception) { }
+        try { btnPlayPause.setImageResource(android.R.drawable.ic_media_play) } catch (_: Exception) { }
+    }
+
     private fun loadCoverListAsync(rutaArchivo: String, imageView: ImageView) {
+        if (rutaArchivo.startsWith("LIVE_STREAM|") || rutaArchivo.startsWith("PENDING_YT|")) {
+            val info = extractStreamThumbInfo(rutaArchivo)
+            val memBmp = info?.first?.let { queueThumbMemoryCache[it] }
+            if (memBmp != null) {
+                imageView.setImageBitmap(memBmp)
+                return
+            }
+            imageView.tag = rutaArchivo
+            lifecycleScope.launch {
+                val bmp = getOrFetchQueueThumbnail(rutaArchivo)
+                if (bmp != null && imageView.tag == rutaArchivo) {
+                    imageView.setImageBitmap(bmp)
+                }
+            }
+            return
+        }
+
         if(rutaArchivo.startsWith("LIVE_STREAM|")){
             loadExternalImageAsync(rutaArchivo.split("|").getOrNull(3) ?: "", imageView)
             return
@@ -1200,7 +1345,7 @@ class MainActivity : AppCompatActivity() {
         txtQueueHeader = TextView(this).apply { text = "COLA DE REPRODUCCION"; textSize = 16f; typeface = Typeface.DEFAULT_BOLD; setPadding(0, 10, 0, 20) }
         sectionQueue.addView(txtQueueHeader)
         recyclerViewQueue = RecyclerView(this).apply { layoutManager = LinearLayoutManager(this@MainActivity); layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.MATCH_PARENT) }
-        queueAdapter = QueueAdapter(playlistActual, { currentIndex }, { currentTheme }, { pos -> resetLoopState(); currentIndex = pos; reproducirCancionActual(); queueAdapter.notifyDataSetChanged() }, { vh -> itemTouchHelper.startDrag(vh) }, { isDark -> getGlassDrawable(isDark) }, { path, imgView -> loadCoverListAsync(path, imgView) })
+        queueAdapter = QueueAdapter(playlistActual, { currentIndex }, { currentTheme }, { pos -> resetLoopState(); resetBarraReproduccionCambioTema(); currentIndex = pos; reproducirCancionActual(); queueAdapter.notifyDataSetChanged() }, { vh -> itemTouchHelper.startDrag(vh) }, { isDark -> getGlassDrawable(isDark) }, { path, imgView -> loadCoverListAsync(path, imgView) }, { lista -> precargarCaratulasCola(lista) })
         recyclerViewQueue.adapter = queueAdapter
         val callback = object : ItemTouchHelper.SimpleCallback(ItemTouchHelper.UP or ItemTouchHelper.DOWN, 0) {
             override fun onMove(r: RecyclerView, vh: RecyclerView.ViewHolder, tgt: RecyclerView.ViewHolder): Boolean {
@@ -1575,9 +1720,18 @@ class MainActivity : AppCompatActivity() {
                 liveEntry = "LIVE_STREAM|$streamUrl|$safeTitle|$vthumb|$ytUrl"
                 resetLoopState()
                 nombrePlaylistActual = origen
-                playlistActual = mutableListOf(liveEntry)
+                val colaInicial = mutableListOf(liveEntry)
+                for (rec in viewModel.fypRecommendations.value) {
+                    val rId = rec["id"].orEmpty()
+                    val rTitle = rec["title"].orEmpty().replace("|", "-").trim()
+                    val rThumb = rec["thumbnail"].orEmpty()
+                    if (rId.isNotBlank() && rId != vid && rTitle.isNotBlank()) {
+                        colaInicial.add("PENDING_YT|$rId|$rTitle|$rThumb|https://www.youtube.com/watch?v=$rId")
+                    }
+                }
+                playlistActual = colaInicial
                 currentIndex = 0
-                if (::queueAdapter.isInitialized) queueAdapter.updateList(playlistActual)
+                if (::queueAdapter.isInitialized) queueAdapter.updateList(playlistActual) else precargarCaratulasCola(playlistActual)
                 reproducirCancionActual()
                 if (irAInicio) {
                     cambiarPestana(0)
@@ -1610,7 +1764,7 @@ class MainActivity : AppCompatActivity() {
                                 nombrePlaylistActual = "Recien agregados"
                                 playlistActual = audioFiles.map { it.absolutePath }.toMutableList()
                                 currentIndex = playlistActual.indexOf(downloadedFile.absolutePath).coerceAtLeast(0)
-                                if (::queueAdapter.isInitialized) queueAdapter.updateList(playlistActual)
+                                if (::queueAdapter.isInitialized) queueAdapter.updateList(playlistActual) else precargarCaratulasCola(playlistActual)
                                 reproducirCancionActual()
                                 if (irAInicio) cambiarPestana(0) else sectionHome.smoothScrollTo(0, 0)
                             } else {
@@ -2187,7 +2341,7 @@ class MainActivity : AppCompatActivity() {
             }
             musicService?.handleDeletedSongs(selectedSongs)
             
-            if (::queueAdapter.isInitialized) queueAdapter.updateList(playlistActual)
+            if (::queueAdapter.isInitialized) queueAdapter.updateList(playlistActual) else precargarCaratulasCola(playlistActual)
             isSelectionMode = false; selectedSongs.clear(); btnBackFolder.performClick(); viewModel.loadLocalMusic()
         }
 

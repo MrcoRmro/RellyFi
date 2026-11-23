@@ -34,6 +34,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.yausername.youtubedl_android.YoutubeDL
+import com.yausername.youtubedl_android.YoutubeDLRequest
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -75,6 +77,7 @@ class MusicPlaybackService : Service() {
 
     private var listener: PlaybackListener? = null
     private var artJob: Job? = null
+    private var streamResolveJob: Job? = null
 
     var playlist: MutableList<String> = mutableListOf()
         private set
@@ -247,6 +250,33 @@ class MusicPlaybackService : Service() {
         playCurrentTrack()
     }
 
+    fun appendToQueue(items: List<String>) {
+        if (items.isEmpty()) return
+        var added = false
+        for (item in items) {
+            val itemKey = when {
+                item.startsWith("PENDING_YT|") -> item.split("|").getOrNull(1)
+                item.startsWith("LIVE_STREAM|") -> item.split("|").getOrNull(4)?.substringAfter("v=")?.substringBefore("&")
+                else -> item
+            }
+            val alreadyExists = playlist.any { existing ->
+                val exKey = when {
+                    existing.startsWith("PENDING_YT|") -> existing.split("|").getOrNull(1)
+                    existing.startsWith("LIVE_STREAM|") -> existing.split("|").getOrNull(4)?.substringAfter("v=")?.substringBefore("&")
+                    else -> existing
+                }
+                !itemKey.isNullOrBlank() && itemKey == exKey
+            }
+            if (!alreadyExists) {
+                playlist.add(item)
+                added = true
+            }
+        }
+        if (added) {
+            listener?.onQueueUpdated(playlist, currentIndex)
+        }
+    }
+
     fun playIndex(index: Int) {
         if (index !in playlist.indices) return
         resetLoop()
@@ -285,9 +315,77 @@ class MusicPlaybackService : Service() {
 
     fun playCurrentTrack() {
         if (playlist.isEmpty() || currentIndex !in playlist.indices) return
+        streamResolveJob?.cancel()
+        try {
+            if (mediaPlayer?.isPlaying == true) {
+                mediaPlayer?.pause()
+            }
+            mediaPlayer?.release()
+            mediaPlayer = null
+        } catch (_: Exception) { }
+        isPrepared = false
+        listener?.onPlaybackStateChanged(false)
+        listener?.onDurationReady(0)
         val songPath = playlist[currentIndex]
 
-        val rawTitle = if (songPath.startsWith("LIVE_STREAM|")) {
+        if (songPath.startsWith("PENDING_YT|")) {
+            val parts = songPath.split("|")
+            val vid = parts.getOrNull(1).orEmpty()
+            val rawTitle = parts.getOrNull(2)?.replace("_", " ") ?: "Cargando stream..."
+            val thumb = parts.getOrNull(3).orEmpty()
+            val ytUrl = parts.getOrNull(4).orEmpty().ifBlank { "https://www.youtube.com/watch?v=$vid" }
+
+            currentTitle = rawTitle
+            currentArtist = "Cargando stream • $playlistName"
+            currentAlbumArt = null
+            isPrepared = false
+
+            listener?.onTrackChanged(songPath, currentIndex, currentTitle, playlistName)
+            listener?.onAlbumArtLoaded(null)
+            loadAlbumArtAsync("LIVE_STREAM||$rawTitle|$thumb|$ytUrl")
+            startServiceInForeground()
+            updateNotification()
+
+            val targetIndex = currentIndex
+            streamResolveJob = serviceScope.launch(Dispatchers.IO) {
+                val directUrl = try {
+                    val req = YoutubeDLRequest(ytUrl).apply {
+                        addOption("--extractor-args", "youtube:player_client=android,web")
+                        addOption("--no-playlist")
+                        addOption("--no-warnings")
+                        addOption("-f", "bestaudio[ext=m4a]/bestaudio/best")
+                        addOption("--get-url")
+                    }
+                    YoutubeDL.getInstance().execute(req, null, null).out
+                        ?.lineSequence()
+                        ?.map { it.trim() }
+                        ?.firstOrNull { it.startsWith("http://") || it.startsWith("https://") }
+                } catch (_: Exception) {
+                    null
+                }
+
+                withContext(Dispatchers.Main) {
+                    if (currentIndex != targetIndex || playlist.getOrNull(targetIndex) != songPath) return@withContext
+                    if (directUrl != null) {
+                        val safeTitle = rawTitle.replace("|", "-").trim()
+                        val resolvedEntry = "LIVE_STREAM|$directUrl|$safeTitle|$thumb|$ytUrl"
+                        playlist[targetIndex] = resolvedEntry
+                        listener?.onQueueUpdated(playlist, currentIndex)
+                        playCurrentTrack()
+                    } else {
+                        // Si un tema falla o está restringido, salta automáticamente al siguiente del FYP
+                        if (playlist.size > 1) {
+                            playNext()
+                        } else {
+                            listener?.onPlaybackStateChanged(false)
+                        }
+                    }
+                }
+            }
+            return
+        }
+
+        val rawTitle = if (songPath.startsWith("LIVE_STREAM|") || songPath.startsWith("PENDING_YT|")) {
             songPath.split("|").getOrNull(2)?.replace("_", " ") ?: "Stream"
         } else {
             songPath.substringAfterLast("/").substringBeforeLast(".").replace("_", " ")
@@ -461,6 +559,7 @@ class MusicPlaybackService : Service() {
     }
 
     fun stopAndClear() {
+        streamResolveJob?.cancel()
         isPrepared = false
         try { mediaPlayer?.stop() } catch (_: Exception) {}
         try { mediaPlayer?.release() } catch (_: Exception) {}
