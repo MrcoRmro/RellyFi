@@ -758,7 +758,8 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
-    }
+            aplicarMargenBarraNavegacionInferior()
+}
 
     private fun getGlassDrawable(isDark: Boolean): GradientDrawable { val glassColor = if (isDark) Color.parseColor("#4D000000") else Color.parseColor("#66FFFFFF"); val strokeColor = if (isDark) Color.parseColor("#33FFFFFF") else Color.parseColor("#33000000"); return GradientDrawable().apply { setColor(glassColor); cornerRadius = 30f; setStroke(2, strokeColor) } }
 
@@ -2603,5 +2604,29 @@ class MainActivity : AppCompatActivity() {
             }
         }
         return null
+    }
+
+    private fun aplicarMargenBarraNavegacionInferior() {
+        val rootView = findViewById<android.view.View>(android.R.id.content) ?: return
+        val baseLeft = rootView.paddingLeft
+        val baseTop = rootView.paddingTop
+        val baseRight = rootView.paddingRight
+        val baseBottom = rootView.paddingBottom
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            rootView.setOnApplyWindowInsetsListener { v, insets ->
+                val navBottom = insets.getInsets(android.view.WindowInsets.Type.navigationBars()).bottom
+                v.setPadding(baseLeft, baseTop, baseRight, baseBottom + navBottom)
+                insets
+            }
+            rootView.requestApplyInsets()
+        } else {
+            @Suppress("DEPRECATION")
+            rootView.setOnApplyWindowInsetsListener { v, insets ->
+                val navBottom = insets.systemWindowInsetBottom
+                v.setPadding(baseLeft, baseTop, baseRight, baseBottom + navBottom)
+                insets
+            }
+            rootView.requestApplyInsets()
+        }
     }
 }

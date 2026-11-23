@@ -22,7 +22,7 @@ android {
         minSdk = 24
         targetSdk = 34
         versionCode = 1
-        versionName = "1.0"
+        versionName = "V2.0"
     }
 
     compileOptions {
@@ -32,6 +32,15 @@ android {
 
     kotlinOptions {
         jvmTarget = "17"
+    }
+
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a")
+            isUniversalApk = true
+        }
     }
 }
 
@@ -69,4 +78,17 @@ dependencies {
 
     // OkHttp para consultas API (LRCLIB lyrics)
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+}
+
+android.applicationVariants.configureEach {
+    outputs.all {
+        val outputImpl = this as com.android.build.gradle.internal.api.ApkVariantOutputImpl
+        val abiName = outputImpl.getFilter(com.android.build.api.variant.FilterConfiguration.FilterType.ABI.name)
+        val label = when (abiName) {
+            null -> "universal"
+            "arm64-v8a" -> "arm"
+            else -> abiName
+        }
+        outputImpl.outputFileName = "REllyFi $label ${versionName}.apk"
+    }
 }
