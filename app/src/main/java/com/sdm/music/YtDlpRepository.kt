@@ -64,13 +64,12 @@ class YtDlpRepository(private val context: Context) {
         results
     }
 
-    // ¡NUEVA FUNCIÓN! Búsqueda estricta en YouTube Music (Ignora videos normales)
-    suspend fun getStrictMusicRecommendations(artist: String, limit: Int = 15): List<Map<String, String>> = withContext(Dispatchers.IO) {
+    // Búsqueda rápida de recomendaciones usando ytsearch (flat-playlist + dump-json)
+    suspend fun getSongRecommendations(query: String, limit: Int = 12): List<Map<String, String>> = withContext(Dispatchers.IO) {
         val results = mutableListOf<Map<String, String>>()
         try {
             ensureInitialized()
-            // ytmsearch garantiza 100% género musical y cero basura de YouTube normal
-            val request = YoutubeDLRequest("ytmsearch$limit:$artist Mix")
+            val request = YoutubeDLRequest("ytsearch$limit:$query")
             request.addOption("--dump-json")
             request.addOption("--flat-playlist")
             request.addOption("--no-warnings")
@@ -93,8 +92,14 @@ class YtDlpRepository(private val context: Context) {
                     } catch (e: Exception) {}
                 }
             }
-        } catch (e: Exception) {}
+        } catch (e: Exception) {
+            android.util.Log.e("YtDlpRepository", "Error en getSongRecommendations: ${e.message}", e)
+        }
         results
+    }
+
+    suspend fun getStrictMusicRecommendations(artist: String, limit: Int = 15): List<Map<String, String>> {
+        return getSongRecommendations("$artist Mix", limit)
     }
 
     suspend fun getStreamUrl(videoId: String): String = withContext(Dispatchers.IO) {

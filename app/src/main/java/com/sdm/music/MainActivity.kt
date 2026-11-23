@@ -24,9 +24,11 @@ import android.os.Handler
 import android.os.Looper
 import android.text.Editable
 import android.text.TextWatcher
+import android.view.GestureDetector
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.ViewOutlineProvider
 import android.widget.*
@@ -39,6 +41,8 @@ import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
+import androidx.palette.graphics.Palette
+import androidx.core.graphics.ColorUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -50,15 +54,37 @@ import kotlin.math.hypot
 import kotlin.math.min
 import kotlin.math.sin
 
+fun TextView.applyContrastingText(isDark: Boolean) {
+    if (isDark) {
+        setTextColor(Color.WHITE)
+        setShadowLayer(4f, 0f, 0f, Color.BLACK)
+    } else {
+        setTextColor(Color.BLACK)
+        setShadowLayer(4f, 0f, 0f, Color.WHITE)
+    }
+}
+
+fun EditText.applyContrastingInput(isDark: Boolean) {
+    if (isDark) {
+        setTextColor(Color.WHITE)
+        setHintTextColor(Color.parseColor("#99FFFFFF"))
+        setShadowLayer(4f, 0f, 0f, Color.BLACK)
+    } else {
+        setTextColor(Color.BLACK)
+        setHintTextColor(Color.parseColor("#99000000"))
+        setShadowLayer(4f, 0f, 0f, Color.WHITE)
+    }
+}
+
 data class ThemeColors(val bgBase: Int, val w1c1: Int, val w1c2: Int, val w2c1: Int, val w2c2: Int, val w3c: Int, val textPrimary: Int, val textSecondary: Int, val accent: Int, val accentDark: Int, val accentLight: Int, val cardBg: Int, val navBg: Int, val isDark: Boolean)
 val THEMES = mapOf(
-    "Blanco con rojo" to ThemeColors(Color.parseColor("#FFF5F5"), Color.parseColor("#FF8A80"), Color.parseColor("#FF80AB"), Color.parseColor("#D50000"), Color.parseColor("#880E4F"), Color.parseColor("#FFCDD2"), Color.parseColor("#222222"), Color.parseColor("#B71C1C"), Color.parseColor("#D50000"), Color.parseColor("#B71C1C"), Color.parseColor("#FFCDD2"), Color.parseColor("#FFFFFF"), Color.parseColor("#E6FFFFFF"), false),
-    "Negro con rojo" to ThemeColors(Color.parseColor("#121212"), Color.parseColor("#880E4F"), Color.parseColor("#4A0000"), Color.parseColor("#D50000"), Color.parseColor("#220000"), Color.parseColor("#3E0000"), Color.parseColor("#FFFFFF"), Color.parseColor("#FFCDD2"), Color.parseColor("#D50000"), Color.parseColor("#B71C1C"), Color.parseColor("#880E4F"), Color.parseColor("#2A2A2A"), Color.parseColor("#CC121212"), true),
-    "Blanco con negro" to ThemeColors(Color.parseColor("#FBFDFB"), Color.parseColor("#E0E0E0"), Color.parseColor("#BDBDBD"), Color.parseColor("#757575"), Color.parseColor("#424242"), Color.parseColor("#EEEEEE"), Color.parseColor("#222222"), Color.parseColor("#616161"), Color.parseColor("#424242"), Color.parseColor("#212121"), Color.parseColor("#E0E0E0"), Color.parseColor("#FFFFFF"), Color.parseColor("#E6FFFFFF"), false),
-    "Negro con morado" to ThemeColors(Color.parseColor("#121212"), Color.parseColor("#4A148C"), Color.parseColor("#311B92"), Color.parseColor("#7B1FA2"), Color.parseColor("#12005E"), Color.parseColor("#2A0054"), Color.parseColor("#FFFFFF"), Color.parseColor("#E1BEE7"), Color.parseColor("#AB47BC"), Color.parseColor("#8E24AA"), Color.parseColor("#4A148C"), Color.parseColor("#2A2A2A"), Color.parseColor("#CC121212"), true),
-    "Blanco con morado" to ThemeColors(Color.parseColor("#F4F0FF"), Color.parseColor("#B39DDB"), Color.parseColor("#CE93D8"), Color.parseColor("#6A1B9A"), Color.parseColor("#4A148C"), Color.parseColor("#E1BEE7"), Color.parseColor("#222222"), Color.parseColor("#6A1B9A"), Color.parseColor("#8E24AA"), Color.parseColor("#4A148C"), Color.parseColor("#E1BEE7"), Color.parseColor("#FFFFFF"), Color.parseColor("#E6FFFFFF"), false),
-    "Negro con verde" to ThemeColors(Color.parseColor("#121212"), Color.parseColor("#1B5E20"), Color.parseColor("#003300"), Color.parseColor("#2E7D32"), Color.parseColor("#001100"), Color.parseColor("#002200"), Color.parseColor("#FFFFFF"), Color.parseColor("#A5D6A7"), Color.parseColor("#4CAF50"), Color.parseColor("#388E3C"), Color.parseColor("#1B5E20"), Color.parseColor("#2A2A2A"), Color.parseColor("#CC121212"), true),
-    "Blanco con verde" to ThemeColors(Color.parseColor("#F0FDF4"), Color.parseColor("#A5D6A7"), Color.parseColor("#81C784"), Color.parseColor("#2E7D32"), Color.parseColor("#1B5E20"), Color.parseColor("#C8E6C9"), Color.parseColor("#222222"), Color.parseColor("#2E7D32"), Color.parseColor("#388E3C"), Color.parseColor("#1B5E20"), Color.parseColor("#C8E6C9"), Color.parseColor("#FFFFFF"), Color.parseColor("#E6FFFFFF"), false)
+    "Blanco con rojo" to ThemeColors(Color.parseColor("#FFF5F5"), Color.parseColor("#FF8A80"), Color.parseColor("#FF80AB"), Color.parseColor("#D50000"), Color.parseColor("#880E4F"), Color.parseColor("#FFCDD2"), Color.BLACK, Color.BLACK, Color.parseColor("#D50000"), Color.parseColor("#B71C1C"), Color.parseColor("#FFCDD2"), Color.parseColor("#FFFFFF"), Color.parseColor("#E6FFFFFF"), false),
+    "Negro con rojo" to ThemeColors(Color.parseColor("#121212"), Color.parseColor("#880E4F"), Color.parseColor("#4A0000"), Color.parseColor("#D50000"), Color.parseColor("#220000"), Color.parseColor("#3E0000"), Color.WHITE, Color.WHITE, Color.parseColor("#D50000"), Color.parseColor("#B71C1C"), Color.parseColor("#880E4F"), Color.parseColor("#2A2A2A"), Color.parseColor("#CC121212"), true),
+    "Blanco con negro" to ThemeColors(Color.parseColor("#FBFDFB"), Color.parseColor("#E0E0E0"), Color.parseColor("#BDBDBD"), Color.parseColor("#757575"), Color.parseColor("#424242"), Color.parseColor("#EEEEEE"), Color.BLACK, Color.BLACK, Color.parseColor("#424242"), Color.parseColor("#212121"), Color.parseColor("#E0E0E0"), Color.parseColor("#FFFFFF"), Color.parseColor("#E6FFFFFF"), false),
+    "Negro con morado" to ThemeColors(Color.parseColor("#121212"), Color.parseColor("#4A148C"), Color.parseColor("#311B92"), Color.parseColor("#7B1FA2"), Color.parseColor("#12005E"), Color.parseColor("#2A0054"), Color.WHITE, Color.WHITE, Color.parseColor("#AB47BC"), Color.parseColor("#8E24AA"), Color.parseColor("#4A148C"), Color.parseColor("#2A2A2A"), Color.parseColor("#CC121212"), true),
+    "Blanco con morado" to ThemeColors(Color.parseColor("#F4F0FF"), Color.parseColor("#B39DDB"), Color.parseColor("#CE93D8"), Color.parseColor("#6A1B9A"), Color.parseColor("#4A148C"), Color.parseColor("#E1BEE7"), Color.BLACK, Color.BLACK, Color.parseColor("#8E24AA"), Color.parseColor("#4A148C"), Color.parseColor("#E1BEE7"), Color.parseColor("#FFFFFF"), Color.parseColor("#E6FFFFFF"), false),
+    "Negro con verde" to ThemeColors(Color.parseColor("#121212"), Color.parseColor("#1B5E20"), Color.parseColor("#003300"), Color.parseColor("#2E7D32"), Color.parseColor("#001100"), Color.parseColor("#002200"), Color.WHITE, Color.WHITE, Color.parseColor("#4CAF50"), Color.parseColor("#388E3C"), Color.parseColor("#1B5E20"), Color.parseColor("#2A2A2A"), Color.parseColor("#CC121212"), true),
+    "Blanco con verde" to ThemeColors(Color.parseColor("#F0FDF4"), Color.parseColor("#A5D6A7"), Color.parseColor("#81C784"), Color.parseColor("#2E7D32"), Color.parseColor("#1B5E20"), Color.parseColor("#C8E6C9"), Color.BLACK, Color.BLACK, Color.parseColor("#388E3C"), Color.parseColor("#1B5E20"), Color.parseColor("#C8E6C9"), Color.parseColor("#FFFFFF"), Color.parseColor("#E6FFFFFF"), false)
 )
 
 class WaveMeshGradientView(context: Context) : View(context) {
@@ -121,9 +147,96 @@ class RadialLikeButton(context: Context) : View(context) {
             val cx = if (touchX == 0f) width / 2f else touchX; val cy = if (touchY == 0f) height / 2f else touchY
             canvas.drawCircle(cx, cy, drawRadius, fillPaint); canvas.restore() 
         }
-        themeColors?.let { textPaint.color = if (drawRadius > width/3f) Color.WHITE else it.accentDark }
+        themeColors?.let { 
+            val isDark = it.isDark
+            val c = if (drawRadius > width / 3f) Color.WHITE else (if (isDark) Color.WHITE else Color.BLACK)
+            textPaint.color = c
+            textPaint.setShadowLayer(4f, 0f, 0f, if (c == Color.WHITE) Color.BLACK else Color.WHITE)
+        }
         val textY = (height / 2f) - ((textPaint.descent() + textPaint.ascent()) / 2f)
         canvas.drawText("LIKE", width / 2f, textY, textPaint)
+    }
+}
+
+class SwipePagingScrollView(context: Context) : HorizontalScrollView(context) {
+    var currentPage: Int = 0
+    var onPageSelected: ((Int) -> Unit)? = null
+    private var downX = 0f
+    private var downY = 0f
+    private var isDraggingHorizontally = false
+    private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop
+
+    private val gestureDetector = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
+        override fun onFling(e1: MotionEvent?, e2: MotionEvent, velocityX: Float, velocityY: Float): Boolean {
+            if (e1 == null) return false
+            val diffX = e2.x - e1.x
+            val diffY = e2.y - e1.y
+            if (kotlin.math.abs(diffX) > kotlin.math.abs(diffY) && kotlin.math.abs(diffX) > 80 && kotlin.math.abs(velocityX) > 250) {
+                if (diffX < 0) {
+                    goToPage(currentPage + 1)
+                } else {
+                    goToPage(currentPage - 1)
+                }
+                return true
+            }
+            return false
+        }
+    })
+
+    override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
+        gestureDetector.onTouchEvent(ev)
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                downX = ev.x
+                downY = ev.y
+                isDraggingHorizontally = false
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val dx = kotlin.math.abs(ev.x - downX)
+                val dy = kotlin.math.abs(ev.y - downY)
+                if (dx > touchSlop && dx > dy * 1.3f) {
+                    isDraggingHorizontally = true
+                    parent?.requestDisallowInterceptTouchEvent(true)
+                    return true
+                }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                isDraggingHorizontally = false
+            }
+        }
+        return isDraggingHorizontally
+    }
+
+    override fun onTouchEvent(ev: MotionEvent): Boolean {
+        if (gestureDetector.onTouchEvent(ev)) return true
+
+        when (ev.actionMasked) {
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                val diffX = ev.x - downX
+                val pageWidth = if (width > 0) width else resources.displayMetrics.widthPixels
+                val threshold = pageWidth / 4f
+                if (diffX < -threshold) {
+                    goToPage(currentPage + 1)
+                } else if (diffX > threshold) {
+                    goToPage(currentPage - 1)
+                } else {
+                    goToPage(currentPage)
+                }
+                isDraggingHorizontally = false
+                return true
+            }
+        }
+        return true
+    }
+
+    fun goToPage(page: Int) {
+        val target = page.coerceIn(0, 4)
+        currentPage = target
+        val pageWidth = if (width > 0) width else resources.displayMetrics.widthPixels
+        post {
+            smoothScrollTo(target * pageWidth, 0)
+        }
+        onPageSelected?.invoke(target)
     }
 }
 
@@ -189,8 +302,9 @@ class QueueAdapter(var songs: MutableList<String>, private var currentIndexProvi
             holder.txtSongName.text = path.substringAfterLast("/").substringBeforeLast(".").replace("_", " ")
         }
         
-        holder.txtSongName.setTextColor(theme.textPrimary); holder.txtSongName.typeface = if (isCurrent) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
-        holder.txtHandle.setTextColor(theme.accentDark)
+        holder.txtSongName.applyContrastingText(theme.isDark)
+        holder.txtSongName.typeface = if (isCurrent) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
+        holder.txtHandle.applyContrastingText(theme.isDark)
         if (isCurrent) { holder.layout.background = GradientDrawable().apply { setColor(theme.accentLight); cornerRadius = 30f; setStroke(2, Color.parseColor(if (theme.isDark) "#33FFFFFF" else "#33000000")) } } else { holder.layout.background = getGlassDrawable(theme.isDark) }
         holder.layout.setOnClickListener { onItemClick(holder.adapterPosition) }; holder.txtHandle.setOnTouchListener { _, event -> if (event.actionMasked == MotionEvent.ACTION_DOWN) onStartDrag(holder); false } 
     }
@@ -205,7 +319,7 @@ class MainActivity : AppCompatActivity() {
     
     private lateinit var mainLayout: CoordinatorLayout
     private lateinit var waveBackgroundView: WaveMeshGradientView
-    private lateinit var tabScrollView: HorizontalScrollView
+    private lateinit var tabScrollView: SwipePagingScrollView
     private lateinit var pagesContainer: LinearLayout
     
     private lateinit var sectionHome: ScrollView
@@ -239,6 +353,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnLoop: Button
     private lateinit var dotLoop: View
     
+    private lateinit var btnAddToPlaylist: Button
     private lateinit var txtFypHeader: TextView
     private lateinit var fypContainer: LinearLayout
     
@@ -253,8 +368,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var inputYtSearch: EditText
     private lateinit var btnDoSearch: Button
     private lateinit var resultContainer: LinearLayout
-            private lateinit var txtSettingsHeader: TextView
+    private lateinit var txtSettingsHeader: TextView
     private lateinit var switchCrossfade: Switch
+    private lateinit var switchDynamicTheme: Switch
     private lateinit var btnSleepTimer: Button
     private lateinit var btnCambiarTema: Button
     
@@ -272,6 +388,8 @@ class MainActivity : AppCompatActivity() {
     private var nombrePlaylistActual: String = "General"
     private var currentIndex: Int = 0
     private var isLooping: Boolean = false
+    private var isDynamicThemeEnabled: Boolean = true
+    private var savedStaticTheme: ThemeColors? = null
     private val handler = Handler(Looper.getMainLooper())
     private lateinit var notificationManager: NotificationManager
     private lateinit var mediaSession: MediaSession
@@ -349,62 +467,78 @@ class MainActivity : AppCompatActivity() {
             viewModel.fypRecommendations.collect { recs ->
                 fypContainer.removeAllViews()
                 if (recs.isEmpty()) return@collect
-                
+                txtFypHeader.text = "🔥 Canciones recomendadas"
+                txtFypHeader.applyContrastingText(currentTheme.isDark)
                 for (item in recs) {
                     val vid = item["id"] ?: ""
                     val vtitle = item["title"] ?: ""
                     val vthumb = item["thumbnail"] ?: ""
                     
-                    val row = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(25, 25, 25, 25); background = getGlassDrawable(currentTheme.isDark); layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 8, 0, 8) } }
-                    val imgC = ImageView(this@MainActivity).apply { layoutParams = LinearLayout.LayoutParams(130, 130).apply { setMargins(0, 0, 30, 0) }; scaleType = ImageView.ScaleType.CENTER_CROP; clipToOutline = true; outlineProvider = object : ViewOutlineProvider() { override fun getOutline(view: View, outline: Outline) { outline.setRoundRect(0, 0, view.width, view.height, 20f) } }; setBackgroundColor(Color.parseColor(if(currentTheme.isDark) "#2A2A2A" else "#E0E0E0")) }
-                    loadExternalImageAsync(vthumb, imgC)
-                    val txtN = TextView(this@MainActivity).apply { text = vtitle; textSize = 15f; setTextColor(currentTheme.textPrimary); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
-                    row.addView(imgC); row.addView(txtN)
-                    row.setOnClickListener {
-                        // 1. DETENER AUDIO INMEDIATAMENTE
-                        try { 
-                            // Intentamos pausar enviando el broadcast que lee tu MediaSession
-                            sendBroadcast(android.content.Intent("ACTION_PAUSE"))
-                        } catch(e: Exception) {}
-
-                        // 2. REINICIO VISUAL INSTANTÁNEO
-                        val safeTitle = vtitle.replace("|", "")
-                        txtTitle.text = safeTitle
-                        txtArtist.text = "Cargando audio..."
-                        txtCurrentTime.text = "00:00"
-                        wavySeekBar.progress = 0f
-                        
-                        // Cargar la carátula temporal vacía o la de baja resolución
-                        // Vaciar la carátula anterior al instante
-                        try { (imgVinyl as? android.widget.ImageView)?.setImageDrawable(null) } catch(e: Exception) {}
-                        
-                        // Cargar la nueva carátula de forma nativa en segundo plano
-                        if (vthumb.isNotEmpty()) {
-                            lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-                                try {
-                                    val stream = java.net.URL(vthumb).openStream()
-                                    val bmp = android.graphics.BitmapFactory.decodeStream(stream)
-                                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
-                                        try { (imgVinyl as? android.widget.ImageView)?.setImageBitmap(bmp) } catch(e: Exception) {}
-                                    }
-                                } catch(e: Exception) {}
-                            }
+                    val row = LinearLayout(this@MainActivity).apply { 
+                        orientation = LinearLayout.HORIZONTAL
+                        gravity = Gravity.CENTER_VERTICAL
+                        setPadding(25, 25, 25, 25)
+                        background = getGlassDrawable(currentTheme.isDark)
+                        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 8, 0, 8) } 
+                    }
+                    val imgC = ImageView(this@MainActivity).apply { 
+                        layoutParams = LinearLayout.LayoutParams(130, 130).apply { setMargins(0, 0, 30, 0) }
+                        scaleType = ImageView.ScaleType.CENTER_CROP
+                        clipToOutline = true
+                        outlineProvider = object : ViewOutlineProvider() { 
+                            override fun getOutline(view: View, outline: Outline) { outline.setRoundRect(0, 0, view.width, view.height, 20f) } 
                         }
-
-                        Toast.makeText(this@MainActivity, "Conectando stream...", Toast.LENGTH_SHORT).show()
-
-                        lifecycleScope.launch {
-                            // 3. OBTENER AUDIO EN SEGUNDO PLANO
-                            val rUrl = viewModel.resolveLiveStreamUrl(vid)
-
-                            if (rUrl.isNotEmpty()) {
-                                val safeTitle = vtitle.replace("|", "")
-                                val queueItem = "LIVE_STREAM|${rUrl}|$safeTitle|$vthumb|https://www.youtube.com/watch?v=$vid"
-                                resetLoopState(); nombrePlaylistActual = "Radio Inteligente"; playlistActual = mutableListOf(queueItem); currentIndex = 0
-                                queueAdapter.updateList(playlistActual)
-                                reproducirCancionActual(); sectionHome.smoothScrollTo(0, 0)
+                        setBackgroundColor(Color.parseColor(if(currentTheme.isDark) "#2A2A2A" else "#E0E0E0")) 
+                    }
+                    loadExternalImageAsync(vthumb, imgC)
+                    val txtN = TextView(this@MainActivity).apply { 
+                        text = vtitle
+                        textSize = 15f
+                        maxLines = 2
+                        ellipsize = android.text.TextUtils.TruncateAt.END
+                        applyContrastingText(currentTheme.isDark)
+                        layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) 
+                    }
+                    row.addView(imgC)
+                    row.addView(txtN)
+                    row.setOnClickListener {
+                        val ytUrl = "https://www.youtube.com/watch?v=$vid"
+                        
+                        val cartel = androidx.appcompat.app.AlertDialog.Builder(this@MainActivity)
+                            .setTitle("Descargando canción")
+                            .setMessage("Descargando \"$vtitle\" en 'Recien agregados'...\nSe reproducirá al terminar.")
+                            .setCancelable(false)
+                            .setNegativeButton("Ocultar") { d, _ -> d.dismiss() }
+                            .create()
+                        cartel.show()
+                        
+                        val destFolder = java.io.File(getExternalFilesDir(null), "Base-Musica/Recien agregados").apply { mkdirs() }
+                        viewModel.loadLocalMusic()
+                        
+                        viewModel.downloadSingleTrack(ytUrl, "Recien agregados") { success ->
+                            try { if (cartel.isShowing) cartel.dismiss() } catch (e: Exception) {}
+                            
+                            if (success) {
+                                android.widget.Toast.makeText(this@MainActivity, "✅ ¡Descarga completa! Reproduciendo...", android.widget.Toast.LENGTH_SHORT).show()
+                                val audioFiles = destFolder.listFiles { file ->
+                                    file.isFile && (file.extension.equals("m4a", true) || 
+                                                    file.extension.equals("mp3", true) || 
+                                                    file.extension.equals("webm", true))
+                                }?.sortedByDescending { it.lastModified() }
+                                
+                                val downloadedFile = audioFiles?.firstOrNull()
+                                if (downloadedFile != null) {
+                                    viewModel.loadLocalMusic()
+                                    resetLoopState()
+                                    nombrePlaylistActual = "Recien agregados"
+                                    playlistActual = audioFiles.map { it.absolutePath }.toMutableList()
+                                    currentIndex = playlistActual.indexOf(downloadedFile.absolutePath).coerceAtLeast(0)
+                                    if (::queueAdapter.isInitialized) queueAdapter.updateList(playlistActual)
+                                    reproducirCancionActual()
+                                    sectionHome.smoothScrollTo(0, 0)
+                                }
                             } else {
-                                Toast.makeText(this@MainActivity, "Error conectando", Toast.LENGTH_SHORT).show()
+                                android.widget.Toast.makeText(this@MainActivity, "❌ Error al descargar canción", android.widget.Toast.LENGTH_SHORT).show()
                             }
                         }
                     }
@@ -413,8 +547,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        lifecycleScope.launch {
-            
         lifecycleScope.launch {
             viewModel.downloadProgress.collect { progressMap ->
                 for (i in 0 until playlistFoldersContainer.childCount) {
@@ -431,10 +563,18 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        viewModel.isFypLoading.collect { isLoading ->
+        lifecycleScope.launch {
+            viewModel.isFypLoading.collect { isLoading ->
                 if (isLoading) {
                     fypContainer.removeAllViews()
-                    fypContainer.addView(TextView(this@MainActivity).apply { text = "Generando Inteligencia Artificial..."; gravity = Gravity.CENTER; setPadding(0, 40, 0, 40); setTextColor(currentTheme.textSecondary) })
+                    txtFypHeader.text = "Buscando recomendaciones..."
+                    txtFypHeader.applyContrastingText(currentTheme.isDark)
+                    fypContainer.addView(TextView(this@MainActivity).apply { 
+                        text = "🎵 Analizando canción y buscando recomendaciones..."; 
+                        gravity = Gravity.CENTER; 
+                        setPadding(0, 40, 0, 40); 
+                        applyContrastingText(currentTheme.isDark) 
+                    })
                 }
             }
         }
@@ -458,39 +598,64 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateUIColors(t: ThemeColors) {
         waveBackgroundView.theme = t
-        txtPlayingFrom.setTextColor(t.accentDark); imgVinyl.holeColor = t.bgBase; txtTitle.setTextColor(t.textPrimary); txtArtist.setTextColor(t.accentDark)
-        wavySeekBar.setColors(t.accentLight, t.accent, t.accentDark); txtCurrentTime.setTextColor(t.accentDark); txtTotalTime.setTextColor(t.accentDark)
-        btnPrev.background = GradientDrawable().apply { setColor(t.accentLight); cornerRadius = 80f }; btnPrev.setColorFilter(t.accentDark)
+        txtPlayingFrom.applyContrastingText(t.isDark); imgVinyl.holeColor = t.bgBase; txtTitle.applyContrastingText(t.isDark); txtArtist.applyContrastingText(t.isDark)
+        wavySeekBar.setColors(t.accentLight, t.accent, t.accentDark); txtCurrentTime.applyContrastingText(t.isDark); txtTotalTime.applyContrastingText(t.isDark)
+        btnPrev.background = GradientDrawable().apply { setColor(t.accentLight); cornerRadius = 80f }; btnPrev.setColorFilter(if (t.isDark) Color.WHITE else Color.BLACK)
         btnPlayPause.background = GradientDrawable().apply { setColor(t.accent); cornerRadius = 50f }; btnPlayPause.setColorFilter(Color.WHITE)
-        btnNext.background = GradientDrawable().apply { setColor(t.accentLight); cornerRadius = 80f }; btnNext.setColorFilter(t.accentDark)
-        btnShuffle.setTextColor(t.accentDark); btnLoop.setTextColor(t.accentDark)
+        btnNext.background = GradientDrawable().apply { setColor(t.accentLight); cornerRadius = 80f }; btnNext.setColorFilter(if (t.isDark) Color.WHITE else Color.BLACK)
+        btnShuffle.applyContrastingText(t.isDark); btnLoop.applyContrastingText(t.isDark)
         (dotLoop.background as GradientDrawable).setColor(if (isLooping) t.accent else Color.TRANSPARENT); dotLoop.invalidate()
         btnFavRadial.themeColors = t
         
-        txtFypHeader.setTextColor(t.textPrimary)
-        txtFypHeader.background = getGlassDrawable(t.isDark)
-        for(i in 0 until fypContainer.childCount){ val row = fypContainer.getChildAt(i) as? LinearLayout ?: continue; row.background = getGlassDrawable(t.isDark); (row.getChildAt(1) as? TextView)?.setTextColor(t.textPrimary) }
+        if (::btnAddToPlaylist.isInitialized) {
+            btnAddToPlaylist.applyContrastingText(t.isDark)
+            btnAddToPlaylist.background = getGlassDrawable(t.isDark)
+        }
+        txtFypHeader.applyContrastingText(t.isDark)
+        for(i in 0 until fypContainer.childCount){ 
+            val row = fypContainer.getChildAt(i) as? LinearLayout ?: continue
+            row.background = getGlassDrawable(t.isDark)
+            (row.getChildAt(1) as? TextView)?.applyContrastingText(t.isDark) 
+        }
         
-        searchInput.setTextColor(t.textPrimary); searchInput.setHintTextColor(t.textSecondary); searchInput.background = getGlassDrawable(t.isDark)
-        txtFoldersHeader.setTextColor(t.textPrimary); txtFolderTitle.setTextColor(t.textPrimary)
-        btnBackFolder.setTextColor(t.accent); btnSelectMode.setTextColor(t.accent); btnDeleteSelected.setColorFilter(t.accentDark)
-        txtQueueHeader.setTextColor(t.textPrimary)
-        txtSearchHeader.setTextColor(t.textPrimary)
-        inputYtSearch.setTextColor(t.textPrimary); inputYtSearch.setHintTextColor(t.textSecondary); inputYtSearch.background = getGlassDrawable(t.isDark)
-        btnDoSearch.setTextColor(t.accent); resultContainer.background = getGlassDrawable(t.isDark)
+        searchInput.applyContrastingInput(t.isDark); searchInput.background = getGlassDrawable(t.isDark)
+        txtFoldersHeader.applyContrastingText(t.isDark); txtFolderTitle.applyContrastingText(t.isDark)
+        btnBackFolder.applyContrastingText(t.isDark); btnSelectMode.applyContrastingText(t.isDark); btnDeleteSelected.setColorFilter(if (t.isDark) Color.WHITE else Color.BLACK)
+        txtQueueHeader.applyContrastingText(t.isDark)
+        txtSearchHeader.applyContrastingText(t.isDark)
+        inputYtSearch.applyContrastingInput(t.isDark); inputYtSearch.background = getGlassDrawable(t.isDark)
+        btnDoSearch.applyContrastingText(t.isDark); resultContainer.background = getGlassDrawable(t.isDark)
         
-        
-        txtSettingsHeader.setTextColor(t.textPrimary)
-        switchCrossfade.setTextColor(t.textPrimary)
-        btnSleepTimer.background = getGlassDrawable(t.isDark); btnSleepTimer.setTextColor(t.accentDark)
-        btnCrearPlaylist.background = getGlassDrawable(t.isDark); btnCrearPlaylist.setTextColor(t.accentDark)
-        btnCambiarTema.background = getGlassDrawable(t.isDark); btnCambiarTema.setTextColor(t.accentDark)
+        txtSettingsHeader.applyContrastingText(t.isDark)
+        switchCrossfade.applyContrastingText(t.isDark)
+        if (::switchDynamicTheme.isInitialized) {
+            switchDynamicTheme.applyContrastingText(t.isDark)
+        }
+        btnSleepTimer.background = getGlassDrawable(t.isDark); btnSleepTimer.applyContrastingText(t.isDark)
+        btnCrearPlaylist.background = getGlassDrawable(t.isDark); btnCrearPlaylist.applyContrastingText(t.isDark)
+        btnCambiarTema.background = getGlassDrawable(t.isDark); btnCambiarTema.applyContrastingText(t.isDark)
         bottomNavGlass.background = GradientDrawable().apply { setColor(t.navBg); cornerRadius = 80f; setStroke(2, Color.parseColor(if(t.isDark) "#44FFFFFF" else "#44000000")) }
-        btnHomeNav.setTextColor(t.accentDark); btnPlaylistsNav.setTextColor(t.accentDark); btnListNav.setTextColor(t.accentDark); btnSearchNav.setTextColor(t.accentDark); btnSettingsNav.setTextColor(t.accentDark)
+        btnHomeNav.applyContrastingText(t.isDark); btnPlaylistsNav.applyContrastingText(t.isDark); btnListNav.applyContrastingText(t.isDark); btnSearchNav.applyContrastingText(t.isDark); btnSettingsNav.applyContrastingText(t.isDark)
+        if (::tabScrollView.isInitialized) {
+            actualizarNavActivo(tabScrollView.currentPage)
+        }
         
         if (::queueAdapter.isInitialized) queueAdapter.notifyDataSetChanged()
-        for (i in 0 until playlistFoldersContainer.childCount) { val child = playlistFoldersContainer.getChildAt(i); if (child is FrameLayout && child.tag != null) { child.background = getGlassDrawable(t.isDark); (child.getChildAt(0) as? WaveFillView)?.themeColor = t.accent; val row = child.getChildAt(1) as LinearLayout; (row.getChildAt(0) as TextView).setTextColor(t.textPrimary); (row.getChildAt(1) as ImageButton).setColorFilter(t.accentDark) } }
-        for (i in 0 until songsListVerticalContainer.childCount) { val row = songsListVerticalContainer.getChildAt(i) as? LinearLayout ?: continue; row.background = getGlassDrawable(t.isDark); (row.getChildAt(1) as? TextView)?.setTextColor(t.textPrimary) }
+        for (i in 0 until playlistFoldersContainer.childCount) { 
+            val child = playlistFoldersContainer.getChildAt(i)
+            if (child is FrameLayout && child.tag != null) { 
+                child.background = getGlassDrawable(t.isDark)
+                (child.getChildAt(0) as? WaveFillView)?.themeColor = t.accent
+                val row = child.getChildAt(1) as LinearLayout
+                (row.getChildAt(0) as TextView).applyContrastingText(t.isDark)
+                (row.getChildAt(1) as ImageButton).setColorFilter(if (t.isDark) Color.WHITE else Color.BLACK)
+            } 
+        }
+        for (i in 0 until songsListVerticalContainer.childCount) { 
+            val row = songsListVerticalContainer.getChildAt(i) as? LinearLayout ?: continue
+            row.background = getGlassDrawable(t.isDark)
+            (row.getChildAt(1) as? TextView)?.applyContrastingText(t.isDark) 
+        }
     }
 
     private fun loadExternalImageAsync(urlString: String, imageView: ImageView) {
@@ -534,8 +699,17 @@ class MainActivity : AppCompatActivity() {
 
     private fun crearPantallaReproductor() {
         val contentFrame = FrameLayout(this).apply { layoutParams = CoordinatorLayout.LayoutParams(CoordinatorLayout.LayoutParams.MATCH_PARENT, CoordinatorLayout.LayoutParams.MATCH_PARENT) }
-        tabScrollView = object : HorizontalScrollView(this) { override fun onTouchEvent(ev: MotionEvent?): Boolean = false; override fun onInterceptTouchEvent(ev: MotionEvent?): Boolean = false }.apply { isSmoothScrollingEnabled = true; layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT).apply { setMargins(0,0,0,220) }; overScrollMode = View.OVER_SCROLL_NEVER
-            isVerticalScrollBarEnabled = false; isHorizontalScrollBarEnabled = false }
+        tabScrollView = SwipePagingScrollView(this).apply { 
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT).apply { setMargins(0,0,0,220) }
+            overScrollMode = View.OVER_SCROLL_NEVER
+            isVerticalScrollBarEnabled = false; isHorizontalScrollBarEnabled = false 
+            onPageSelected = { page ->
+                actualizarNavActivo(page)
+                if (page == 2) {
+                    queueAdapter.notifyDataSetChanged()
+                }
+            }
+        }
         pagesContainer = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         val screenWidth = resources.displayMetrics.widthPixels; val lpPage = LinearLayout.LayoutParams(screenWidth, LinearLayout.LayoutParams.MATCH_PARENT)
 
@@ -576,23 +750,30 @@ class MainActivity : AppCompatActivity() {
         homeContent.addView(txtTitle); homeContent.addView(txtArtist); homeContent.addView(wavySeekBar); homeContent.addView(timeLayout); homeContent.addView(controlsRow1); homeContent.addView(controlsRow2)
         
         val divider = View(this).apply { layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 2).apply { setMargins(0, 80, 0, 40) }; setBackgroundColor(Color.parseColor("#33888888")) }
-        txtFypHeader = android.widget.Button(this).apply { 
-        text = "Agregar a Playlist"
-        isAllCaps = false
-        setOnClickListener { 
-            if (playlistActual.isNotEmpty() && currentIndex >= 0 && currentIndex < playlistActual.size) {
-                showAddToPlaylistDialog(playlistActual[currentIndex])
-            } else {
-                android.widget.Toast.makeText(this@MainActivity, "Reproduce una canción primero", android.widget.Toast.LENGTH_SHORT).show()
+        btnAddToPlaylist = Button(this).apply { 
+            text = "➕ Agregar canción a Playlist"
+            isAllCaps = false
+            setOnClickListener { 
+                if (playlistActual.isNotEmpty() && currentIndex >= 0 && currentIndex < playlistActual.size) {
+                    showAddToPlaylistDialog(playlistActual[currentIndex])
+                } else {
+                    android.widget.Toast.makeText(this@MainActivity, "Reproduce una canción primero", android.widget.Toast.LENGTH_SHORT).show()
+                }
             }
+            textSize = 14f
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, 30, 0, 30)
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 20, 0, 20) }
         }
-        textSize = 15f
-        typeface = Typeface.DEFAULT_BOLD
-        setPadding(0, 35, 0, 35)
-        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 40, 0, 0) }
-    }
+        txtFypHeader = TextView(this).apply { 
+            text = "🔥 Canciones recomendadas"
+            textSize = 18f
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, 20, 0, 15)
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        }
         fypContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT) }
-        homeContent.addView(divider); homeContent.addView(txtFypHeader); homeContent.addView(fypContainer)
+        homeContent.addView(divider); homeContent.addView(btnAddToPlaylist); homeContent.addView(txtFypHeader); homeContent.addView(fypContainer)
         sectionHome.addView(homeContent)
         
         // --- PLAYLIST ---
@@ -614,7 +795,7 @@ class MainActivity : AppCompatActivity() {
                             val songRow = LinearLayout(this@MainActivity).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(25, 25, 25, 25); background = getGlassDrawable(currentTheme.isDark); layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 8, 0, 8) }; setOnClickListener { resetLoopState(); nombrePlaylistActual = "Búsqueda"; playlistActual = results; currentIndex = idx; if(::queueAdapter.isInitialized) queueAdapter.updateList(playlistActual); reproducirCancionActual(); cambiarPestana(0) } }
                             val imgCover = ImageView(this@MainActivity).apply { layoutParams = LinearLayout.LayoutParams(130, 130).apply { setMargins(0, 0, 30, 0) }; scaleType = ImageView.ScaleType.CENTER_CROP; clipToOutline = true; outlineProvider = object : ViewOutlineProvider() { override fun getOutline(view: View, outline: Outline) { outline.setRoundRect(0, 0, view.width, view.height, 20f) } }; setBackgroundColor(Color.parseColor(if(currentTheme.isDark) "#2A2A2A" else "#E0E0E0")) }
                             loadCoverListAsync(songPath, imgCover)
-                            val txtName = TextView(this@MainActivity).apply { text = songPath.substringAfterLast("/").substringBeforeLast(".").replace("_", " "); textSize = 15f; setTextColor(currentTheme.textPrimary); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
+                            val txtName = TextView(this@MainActivity).apply { text = songPath.substringAfterLast("/").substringBeforeLast(".").replace("_", " "); textSize = 15f; applyContrastingText(currentTheme.isDark); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
                             songRow.addView(imgCover); songRow.addView(txtName); songsListVerticalContainer.addView(songRow)
                         }
                     }
@@ -718,7 +899,7 @@ class MainActivity : AppCompatActivity() {
                     val txt = TextView(this@MainActivity).apply { 
                         text = titleText
                         textSize = 15f
-                        setTextColor(currentTheme.textPrimary)
+                        applyContrastingText(currentTheme.isDark)
                         layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0,0,15,0) }
                         maxLines = 2
                         ellipsize = android.text.TextUtils.TruncateAt.END 
@@ -727,7 +908,7 @@ class MainActivity : AppCompatActivity() {
                         setImageResource(android.R.drawable.stat_sys_download)
                         background = null
                         setPadding(20,0,20,0)
-                        setColorFilter(currentTheme.accentDark) 
+                        setColorFilter(if (currentTheme.isDark) Color.WHITE else Color.BLACK) 
                     }
                     
                     btnDl.setOnClickListener {
@@ -767,7 +948,22 @@ class MainActivity : AppCompatActivity() {
         switchCrossfade = Switch(this).apply { text = "Fundido Suave (Fade Out)"; textSize = 16f; isChecked = isCrossfadeEnabled; setPadding(40,40,40,40); setOnCheckedChangeListener { _, isChecked -> isCrossfadeEnabled = isChecked; prefs.edit().putBoolean("CROSSFADE", isChecked).apply() } }
         btnSleepTimer = Button(this).apply { text = "Temporizador de Apagado"; setOnClickListener { mostrarDialogoSleepTimer() }; layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 20, 0, 20) } }
 
-        sectionSettings.addView(txtSettingsHeader); sectionSettings.addView(btnCambiarTema); sectionSettings.addView(txtHeaderPlayback); sectionSettings.addView(switchCrossfade); sectionSettings.addView(btnSleepTimer)
+        switchDynamicTheme = Switch(this).apply {
+            text = "Tema Dinámico (desde carátula)"
+            textSize = 16f
+            isChecked = isDynamicThemeEnabled
+            setPadding(40, 40, 40, 40)
+            setOnCheckedChangeListener { _, isChecked ->
+                isDynamicThemeEnabled = isChecked
+                if (!isChecked) {
+                    val savedName = prefs.getString("APP_THEME", "Blanco con rojo") ?: "Blanco con rojo"
+                    animateThemeTransition(THEMES[savedName] ?: THEMES["Blanco con rojo"]!!)
+                } else {
+                    imgVinyl.bitmap?.let { extraerTemaDinamicoDeCaratula(it) }
+                }
+            }
+        }
+        sectionSettings.addView(txtSettingsHeader); sectionSettings.addView(btnCambiarTema); sectionSettings.addView(txtHeaderPlayback); sectionSettings.addView(switchCrossfade); sectionSettings.addView(switchDynamicTheme); sectionSettings.addView(btnSleepTimer)
         
         pagesContainer.addView(sectionHome); pagesContainer.addView(sectionPlaylist); pagesContainer.addView(sectionQueue); pagesContainer.addView(sectionSearch); pagesContainer.addView(sectionSettings)
         tabScrollView.addView(pagesContainer); contentFrame.addView(tabScrollView)
@@ -838,16 +1034,28 @@ class MainActivity : AppCompatActivity() {
         btnFavRadial.setLikedState(isNowLiked)
     }
 
-    private fun cambiarPestana(index: Int) { tabScrollView.post { tabScrollView.smoothScrollTo(index * tabScrollView.width, 0) }; if (index == 2) { queueAdapter.notifyDataSetChanged() } }
+    private fun cambiarPestana(index: Int) { 
+        tabScrollView.goToPage(index) 
+    }
 
-        private fun renderizarListaDeCarpetas() {
+    private fun actualizarNavActivo(activePage: Int) {
+        if (!::btnHomeNav.isInitialized) return
+        val navButtons = listOf(btnHomeNav, btnPlaylistsNav, btnListNav, btnSearchNav, btnSettingsNav)
+        navButtons.forEachIndexed { idx, btn ->
+            btn.alpha = if (idx == activePage) 1.0f else 0.55f
+        }
+    }
+
+    private fun renderizarListaDeCarpetas() {
         playlistFoldersContainer.removeAllViews(); playlistFoldersContainer.addView(btnCrearPlaylist); playlistFoldersContainer.addView(txtFoldersHeader)
         mapPlaylists.keys.forEach { folderName ->
             val folderWrapper = FrameLayout(this).apply { layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 10, 0, 10) }; background = getGlassDrawable(currentTheme.isDark); outlineProvider = ViewOutlineProvider.BACKGROUND; clipToOutline = true; tag = folderName }
             val waveView = WaveFillView(this).apply { themeColor = currentTheme.accent; layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT) }
             val folderRow = LinearLayout(this).apply { layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT); orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(40, 40, 40, 40); setOnClickListener { abrirCarpetaPlaylist(folderName) } }
-            folderRow.addView(TextView(this).apply { text = folderName; textSize = 16f; typeface = Typeface.DEFAULT_BOLD; setTextColor(currentTheme.textPrimary); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) })
-            folderRow.addView(ImageButton(this).apply { setImageResource(android.R.drawable.ic_menu_edit); background = null; setColorFilter(currentTheme.accentDark); setPadding(10,10,10,10); setOnClickListener { mostrarDialogoEditar(folderName) } })
+            val txtFolder = TextView(this).apply { text = folderName; textSize = 16f; typeface = Typeface.DEFAULT_BOLD; applyContrastingText(currentTheme.isDark); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
+            val btnEdit = ImageButton(this).apply { setImageResource(android.R.drawable.ic_menu_edit); background = null; setColorFilter(if (currentTheme.isDark) Color.WHITE else Color.BLACK); setPadding(10,10,10,10); setOnClickListener { mostrarDialogoEditar(folderName) } }
+            folderRow.addView(txtFolder)
+            folderRow.addView(btnEdit)
             folderWrapper.addView(waveView); folderWrapper.addView(folderRow); playlistFoldersContainer.addView(folderWrapper)
         }
     }
@@ -977,7 +1185,7 @@ class MainActivity : AppCompatActivity() {
             val songRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(25, 25, 25, 25); background = getGlassDrawable(currentTheme.isDark); layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 8, 0, 8) }; tag = songPath }
             val imgCover = ImageView(this).apply { layoutParams = LinearLayout.LayoutParams(130, 130).apply { setMargins(0, 0, 30, 0) }; scaleType = ImageView.ScaleType.CENTER_CROP; clipToOutline = true; outlineProvider = object : ViewOutlineProvider() { override fun getOutline(view: View, outline: Outline) { outline.setRoundRect(0, 0, view.width, view.height, 20f) } }; setBackgroundColor(Color.parseColor(if(currentTheme.isDark) "#2A2A2A" else "#E0E0E0")) }
             loadCoverListAsync(songPath, imgCover)
-            val txtName = TextView(this).apply { text = songPath.substringAfterLast("/").substringBeforeLast(".").replace("_", " "); textSize = 15f; setTextColor(currentTheme.textPrimary); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
+            val txtName = TextView(this).apply { text = songPath.substringAfterLast("/").substringBeforeLast(".").replace("_", " "); textSize = 15f; applyContrastingText(currentTheme.isDark); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
             val dotSelection = View(this).apply { layoutParams = LinearLayout.LayoutParams(40, 40).apply { setMargins(20, 0, 10, 0) }; background = GradientDrawable().apply { cornerRadius = 20f; setColor(Color.TRANSPARENT); setStroke(4, currentTheme.accentDark) }; visibility = View.GONE }
 
             songRow.setOnClickListener { 
@@ -995,6 +1203,91 @@ class MainActivity : AppCompatActivity() {
         dotLoop.invalidate()
     }
 
+    private fun extraerTemaDinamicoDeCaratula(bitmap: Bitmap) {
+        if (!isDynamicThemeEnabled) return
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val scaledBmp = Bitmap.createScaledBitmap(bitmap, 150, 150, true)
+                val palette = Palette.from(scaledBmp).generate()
+
+                val vibrantSwatch = palette.vibrantSwatch
+                val dominantSwatch = palette.dominantSwatch
+                val primarySwatch = vibrantSwatch ?: dominantSwatch
+
+                val mutedSwatch = palette.mutedSwatch
+                val darkVibrantSwatch = palette.darkVibrantSwatch
+                val secondarySwatch = mutedSwatch ?: darkVibrantSwatch
+
+                if (primarySwatch == null) return@launch
+
+                val primaryColor = primarySwatch.rgb
+                val secondaryColor = secondarySwatch?.rgb ?: primaryColor
+
+                val primaryLuminance = ColorUtils.calculateLuminance(primaryColor)
+                val secondaryLuminance = ColorUtils.calculateLuminance(secondaryColor)
+
+                val isDark = secondaryLuminance < 0.35
+
+                val bgBase = if (isDark) {
+                    ColorUtils.blendARGB(secondaryColor, Color.parseColor("#111111"), 0.75f)
+                } else {
+                    ColorUtils.blendARGB(secondaryColor, Color.WHITE, 0.80f)
+                }
+
+                val cardBg = if (isDark) {
+                    ColorUtils.blendARGB(secondaryColor, Color.parseColor("#1A1A1A"), 0.65f)
+                } else {
+                    ColorUtils.blendARGB(Color.WHITE, primaryColor, 0.07f)
+                }
+
+                val navBg = ColorUtils.setAlphaComponent(bgBase, 204)
+
+                val accentLight = if (isDark) {
+                    ColorUtils.blendARGB(primaryColor, Color.parseColor("#222222"), 0.60f)
+                } else {
+                    ColorUtils.blendARGB(primaryColor, Color.WHITE, 0.65f)
+                }
+
+                val w1c1 = ColorUtils.blendARGB(primaryColor, secondaryColor, 0.3f)
+                val w1c2 = ColorUtils.blendARGB(primaryColor, bgBase, 0.4f)
+                val w2c1 = secondaryColor
+                val w2c2 = ColorUtils.blendARGB(secondaryColor, bgBase, 0.5f)
+                val w3c = ColorUtils.blendARGB(secondaryColor, bgBase, 0.75f)
+
+                val bgLuminance = ColorUtils.calculateLuminance(bgBase)
+                val textPrimary = if (bgLuminance > 0.4) Color.BLACK else Color.WHITE
+                val textSecondary = if (bgLuminance > 0.4) Color.BLACK else Color.WHITE
+
+                val dynamicTheme = ThemeColors(
+                    bgBase = bgBase,
+                    w1c1 = w1c1,
+                    w1c2 = w1c2,
+                    w2c1 = w2c1,
+                    w2c2 = w2c2,
+                    w3c = w3c,
+                    textPrimary = textPrimary,
+                    textSecondary = textSecondary,
+                    accent = primaryColor,
+                    accentDark = if (primaryLuminance > 0.5) {
+                        ColorUtils.blendARGB(primaryColor, Color.BLACK, 0.4f)
+                    } else {
+                        primaryColor
+                    },
+                    accentLight = accentLight,
+                    cardBg = cardBg,
+                    navBg = navBg,
+                    isDark = isDark
+                )
+
+                withContext(Dispatchers.Main) {
+                    animateThemeTransition(dynamicTheme)
+                }
+            } catch (e: Exception) {
+                // Si falla la extracción, no hacer nada (mantener tema actual)
+            }
+        }
+    }
+
     private fun cargarCaratula(rutaArchivo: String) { 
         imgVinyl.bitmap = null
         if (rutaArchivo.startsWith("LIVE_STREAM|")) {
@@ -1004,7 +1297,7 @@ class MainActivity : AppCompatActivity() {
                     try {
                         val conn = URL(urlImg).openConnection() as HttpURLConnection
                         conn.connectTimeout = 5000; conn.doInput = true; conn.connect()
-                        if (conn.responseCode == 200) { val bmp = BitmapFactory.decodeStream(conn.inputStream); withContext(Dispatchers.Main) { imgVinyl.bitmap = bmp; actualizarNotificacion() } }
+                        if (conn.responseCode == 200) { val bmp = BitmapFactory.decodeStream(conn.inputStream); withContext(Dispatchers.Main) { imgVinyl.bitmap = bmp; actualizarNotificacion() }; if (bmp != null) extraerTemaDinamicoDeCaratula(bmp) }
                         conn.disconnect()
                     } catch (e: Exception) {}
                 }
@@ -1019,10 +1312,15 @@ class MainActivity : AppCompatActivity() {
                 if (pic != null) {
                     val bmp = BitmapFactory.decodeByteArray(pic, 0, pic.size)
                     withContext(Dispatchers.Main) { imgVinyl.bitmap = bmp; actualizarNotificacion() }
+                    extraerTemaDinamicoDeCaratula(bmp)
                 } else {
                     val baseName = File(rutaArchivo).nameWithoutExtension
                     val dir = File(rutaArchivo).parentFile; val cover = dir?.listFiles()?.firstOrNull { it.name.startsWith(baseName) && (it.name.endsWith(".jpg") || it.name.endsWith(".png")) }
-                    if (cover != null) withContext(Dispatchers.Main) { imgVinyl.bitmap = BitmapFactory.decodeFile(cover.absolutePath); actualizarNotificacion() }
+                    if (cover != null) {
+                        val bmp = BitmapFactory.decodeFile(cover.absolutePath)
+                        withContext(Dispatchers.Main) { imgVinyl.bitmap = bmp; actualizarNotificacion() }
+                        if (bmp != null) extraerTemaDinamicoDeCaratula(bmp)
+                    }
                 }
                 mmr.release()
             } catch (e: Exception) { }
@@ -1044,7 +1342,7 @@ class MainActivity : AppCompatActivity() {
             btnFavRadial.setLikedState(estaEnFavs)
             
             cargarCaratula(rutaArchivo)
-            // FYP Eliminado
+            viewModel.triggerFypForSong(rutaArchivo, rawTitle.replace("_", " "))
             
             try {
                 mediaPlayer?.release()
@@ -1063,7 +1361,7 @@ class MainActivity : AppCompatActivity() {
         val nombreCorto = rutaArchivo.substringAfterLast("/")
         txtTitle.text = nombreCorto.substringBeforeLast(".").replace("_", " "); txtArtist.text = "Playlist: $nombrePlaylistActual"
         btnFavRadial.setLikedState(viewModel.isSongLiked(rutaArchivo)); cargarCaratula(rutaArchivo)
-        // FYP Eliminado
+        viewModel.triggerFypForSong(rutaArchivo, nombreCorto.substringBeforeLast(".").replace("_", " "))
         
         try {
             mediaPlayer?.release()

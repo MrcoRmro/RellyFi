@@ -11,11 +11,16 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
+import com.sdm.music.FypCacheDao
+import com.sdm.music.FypCacheEntity
+import com.sdm.music.AppDatabase
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val musicRepo = MusicRepository(application)
     private val ytRepo = YtDlpRepository(application)
+    private val fypCacheDao: FypCacheDao = AppDatabase.getInstance(application).fypCacheDao()
+    private var lastFypArtist: String = ""
 
     private val _playlists = MutableStateFlow<Map<String, List<String>>>(emptyMap())
     val playlists: StateFlow<Map<String, List<String>>> = _playlists
@@ -30,6 +35,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _downloadProgress = MutableStateFlow<Map<String, Float>>(emptyMap())
     val downloadProgress: StateFlow<Map<String, Float>> = _downloadProgress
+
+    private fun cleanArtistName(raw: String): String {
+        return raw
+            .replace(Regex("\\s*[-–_]\\s*(Topic|VEVO|Official|Oficial|Music|Records|Entertainment|Channel|TV|HD|4K|Audio|Video|Lyrics)(\\s|$)", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("\\(.*?\\)", RegexOption.DOT_MATCHES_ALL), "")
+            .replace(Regex("\\[.*?\\]", RegexOption.DOT_MATCHES_ALL), "")
+            .replace("_", " ")
+            .replace(Regex("\\s{2,}"), " ")
+            .trim()
+    }
 
     init {
         // Limpiador: Borra descargas interrumpidas al iniciar
@@ -83,6 +98,93 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {  }
+            }
+        }
+    }
+
+    fun triggerFypForSong(songPath: String, songTitle: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                // 1. Extraer artista y título de la canción que se reproduce actualmente
+                val metadata = if (!songPath.startsWith("LIVE_STREAM|")) {
+                    musicRepo.getSongMetadata(songPath)
+                } else emptyMap()
+
+                val metaArtist = metadata["artist"]?.takeIf { it.isNotBlank() && !it.equals("Unknown", ignoreCase = true) }
+                val cleanTitle = cleanArtistName(songTitle.substringBeforeLast(".").replace("_", " "))
+
+                val detectedArtist = metaArtist ?: when {
+                    cleanTitle.contains(" - ") -> cleanTitle.substringBefore(" - ").trim()
+                    cleanTitle.contains(" – ") -> cleanTitle.substringBefore(" – ").trim()
+                    else -> ""
+                }
+                val cleanArtist = cleanArtistName(detectedArtist)
+
+                val searchKey = when {
+                    cleanArtist.isNotBlank() && cleanArtist.length >= 2 -> cleanArtist
+                    cleanTitle.isNotBlank() && cleanTitle.length >= 2 -> cleanTitle
+                    else -> "Música recomendada"
+                }
+
+                if (searchKey.equals(lastFypArtist, ignoreCase = true) && _fypRecommendations.value.isNotEmpty()) {
+                    return@launch
+                }
+
+                // 2. Verificar caché en Room (válido por 24 horas)
+                val oneDayAgo = System.currentTimeMillis() - 24 * 60 * 60 * 1000L
+                val freshCount = fypCacheDao.countFreshEntries(searchKey, oneDayAgo)
+
+                if (freshCount > 0) {
+                    val cached = fypCacheDao.getForArtist(searchKey)
+                    val mapped = cached.map { mapOf("id" to it.videoId, "title" to it.title, "thumbnail" to it.thumbnail) }
+                    withContext(Dispatchers.Main) {
+                        lastFypArtist = searchKey
+                        _fypRecommendations.value = mapped
+                    }
+                    return@launch
+                }
+
+                // 3. Caché miss: Buscar en segundo plano en YouTube con flat-playlist
+                withContext(Dispatchers.Main) {
+                    _isFypLoading.value = true
+                    _fypRecommendations.value = emptyList()
+                }
+
+                val query = if (cleanArtist.isNotBlank()) {
+                    "$cleanArtist canciones"
+                } else {
+                    "$cleanTitle mix"
+                }
+
+                val results = ytRepo.getSongRecommendations(query, 12)
+
+                if (results.isNotEmpty()) {
+                    lastFypArtist = searchKey
+                    fypCacheDao.deleteForArtist(searchKey)
+                    val entities = results.map { r ->
+                        FypCacheEntity(
+                            artistKey = searchKey,
+                            videoId = r["id"] ?: "",
+                            title = r["title"] ?: "",
+                            thumbnail = r["thumbnail"] ?: ""
+                        )
+                    }
+                    fypCacheDao.insertAll(entities)
+
+                    withContext(Dispatchers.Main) { _fypRecommendations.value = results }
+                } else {
+                    // Fallback con mix amplio
+                    val fallbackResults = ytRepo.getSongRecommendations("$searchKey mix", 10)
+                    if (fallbackResults.isNotEmpty()) {
+                        lastFypArtist = searchKey
+                        withContext(Dispatchers.Main) { _fypRecommendations.value = fallbackResults }
+                    }
+                }
+
+            } catch (e: Exception) {
+                android.util.Log.e("RellyFi", "Error en triggerFypForSong: ${e.message}", e)
+            } finally {
+                withContext(Dispatchers.Main) { _isFypLoading.value = false }
             }
         }
     }
