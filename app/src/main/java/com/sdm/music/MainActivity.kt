@@ -389,7 +389,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var txtSettingsHeader: TextView
     private lateinit var switchCrossfade: Switch
     private lateinit var switchDynamicTheme: Switch
-    private lateinit var switchAutoVideo: Switch
+    private lateinit var btnOpcionesDescarga: Button
     private lateinit var btnSleepTimer: Button
     private lateinit var btnCambiarTema: Button
     
@@ -407,8 +407,12 @@ class MainActivity : AppCompatActivity() {
     private var videoSurface: Surface? = null
     private var isTvMode: Boolean = false
     private var isVideoPrepared: Boolean = false
+    private var videoStreamJob: kotlinx.coroutines.Job? = null
+    private data class CachedStream(val audioUrl: String?, val videoUrl: String?, val timestampMs: Long)
+    private val streamCache = java.util.concurrent.ConcurrentHashMap<String, CachedStream>()
     private var isDownloadingClip: Boolean = false
     private var isAutoDownloadVideoEnabled: Boolean = true
+    private var isStreamOnlyEnabled: Boolean = false
     private val activeVideoDownloads = ConcurrentHashMap.newKeySet<String>()
     private var liveVideoThemeController: LiveVideoThemeController? = null
     private var liveThemeAnimator: ValueAnimator? = null
@@ -540,6 +544,7 @@ class MainActivity : AppCompatActivity() {
         prefs = getSharedPreferences("SDM_SESSION", Context.MODE_PRIVATE)
         isCrossfadeEnabled = prefs.getBoolean("CROSSFADE", false)
         isAutoDownloadVideoEnabled = prefs.getBoolean("AUTO_DOWNLOAD_VIDEO", true)
+        isStreamOnlyEnabled = prefs.getBoolean("STREAM_ONLY_MODE", false)
         val savedThemeName = prefs.getString("APP_THEME", "Blanco con rojo") ?: "Blanco con rojo"
         currentTheme = THEMES[savedThemeName] ?: THEMES["Blanco con rojo"]!!
         
@@ -661,38 +666,13 @@ class MainActivity : AppCompatActivity() {
                     row.addView(imgC)
                     row.addView(txtN)
                     row.setOnClickListener {
-                        val ytUrl = "https://www.youtube.com/watch?v=$vid"
-                        
-                        android.widget.Toast.makeText(this@MainActivity, "Descargando, se reproducirá al terminar", android.widget.Toast.LENGTH_SHORT).show()
-                        
-                        val destFolder = java.io.File(getExternalFilesDir(null), "Base-Musica/Recien agregados").apply { mkdirs() }
-                        viewModel.loadLocalMusic()
-                        
-                        viewModel.downloadSingleTrack(ytUrl, "Recien agregados") { success ->
-                            if (success) {
-                                autoDownloadMatchingVideo(ytUrl, destFolder)
-                                android.widget.Toast.makeText(this@MainActivity, "¡Descarga completa! Reproduciendo...", android.widget.Toast.LENGTH_SHORT).show()
-                                val audioFiles = destFolder.listFiles { file ->
-                                    file.isFile && (file.extension.equals("m4a", true) || 
-                                                    file.extension.equals("mp3", true) || 
-                                                    file.extension.equals("webm", true))
-                                }?.sortedByDescending { it.lastModified() }
-                                
-                                val downloadedFile = audioFiles?.firstOrNull()
-                                if (downloadedFile != null) {
-                                    viewModel.loadLocalMusic()
-                                    resetLoopState()
-                                    nombrePlaylistActual = "Recien agregados"
-                                    playlistActual = audioFiles.map { it.absolutePath }.toMutableList()
-                                    currentIndex = playlistActual.indexOf(downloadedFile.absolutePath).coerceAtLeast(0)
-                                    if (::queueAdapter.isInitialized) queueAdapter.updateList(playlistActual)
-                                    reproducirCancionActual()
-                                    sectionHome.smoothScrollTo(0, 0)
-                                }
-                            } else {
-                                android.widget.Toast.makeText(this@MainActivity, "Error al descargar canción", android.widget.Toast.LENGTH_SHORT).show()
-                            }
-                        }
+                        reproducirDesdeYoutube(
+                            vid = vid,
+                            vtitle = vtitle,
+                            vthumb = vthumb,
+                            origen = "Recomendados",
+                            irAInicio = false
+                        )
                     }
                     fypContainer.addView(row)
                 }
@@ -883,8 +863,9 @@ class MainActivity : AppCompatActivity() {
         if (::switchDynamicTheme.isInitialized) {
             switchDynamicTheme.applyContrastingText(t.isDark)
         }
-        if (::switchAutoVideo.isInitialized) {
-            switchAutoVideo.applyContrastingText(t.isDark)
+        if (::btnOpcionesDescarga.isInitialized) {
+            btnOpcionesDescarga.background = getGlassDrawable(t.isDark)
+            btnOpcionesDescarga.applyContrastingText(t.isDark)
         }
         btnSleepTimer.background = getGlassDrawable(t.isDark); btnSleepTimer.applyContrastingText(t.isDark)
         btnCrearPlaylist.background = getGlassDrawable(t.isDark); btnCrearPlaylist.applyContrastingText(t.isDark)
@@ -1359,6 +1340,18 @@ class MainActivity : AppCompatActivity() {
                                 }
                             }
                         }
+                        row.setOnClickListener {
+                            val ytId = data["id"] ?: ""
+                            if (ytId.isNotEmpty()) {
+                                reproducirDesdeYoutube(
+                                    vid = ytId,
+                                    vtitle = titleText,
+                                    vthumb = thumbUrl,
+                                    origen = "Búsqueda YouTube",
+                                    irAInicio = true
+                                )
+                            }
+                        }
                         row.addView(img)
                         row.addView(txt)
                         row.addView(btnDl)
@@ -1403,18 +1396,16 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        switchAutoVideo = Switch(this).apply {
-            text = "Descargar videoclip automáticamente"
-            textSize = 16f
-            isChecked = isAutoDownloadVideoEnabled
-            setPadding(40, 40, 40, 40)
-            setOnCheckedChangeListener { _, isChecked ->
-                isAutoDownloadVideoEnabled = isChecked
-                prefs.edit().putBoolean("AUTO_DOWNLOAD_VIDEO", isChecked).apply()
-            }
+        btnOpcionesDescarga = Button(this).apply {
+            text = "Opciones de descargas"
+            setOnClickListener { mostrarDialogoOpcionesDescarga() }
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, 10, 0, 20) }
         }
 
-        sectionSettings.addView(txtSettingsHeader); sectionSettings.addView(btnCambiarTema); sectionSettings.addView(txtHeaderPlayback); sectionSettings.addView(switchCrossfade); sectionSettings.addView(switchDynamicTheme); sectionSettings.addView(switchAutoVideo); sectionSettings.addView(btnSleepTimer)
+        sectionSettings.addView(txtSettingsHeader); sectionSettings.addView(btnCambiarTema); sectionSettings.addView(txtHeaderPlayback); sectionSettings.addView(switchCrossfade); sectionSettings.addView(switchDynamicTheme); sectionSettings.addView(btnOpcionesDescarga); sectionSettings.addView(btnSleepTimer)
         
         pagesContainer.addView(sectionHome); pagesContainer.addView(sectionPlaylist); pagesContainer.addView(sectionQueue); pagesContainer.addView(sectionSearch); pagesContainer.addView(sectionSettings)
         tabScrollView.addView(pagesContainer); contentFrame.addView(tabScrollView)
@@ -1432,6 +1423,211 @@ class MainActivity : AppCompatActivity() {
         bottomNavGlass.addView(btnSearchNav, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f))
         bottomNavGlass.addView(btnSettingsNav, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f))
         contentFrame.addView(bottomNavGlass); mainLayout.addView(contentFrame)
+    }
+
+    private fun mostrarDialogoOpcionesDescarga() {
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(50, 30, 50, 20)
+        }
+
+        val swStreamOnly = Switch(this).apply {
+            text = "Reproducir sin descargar"
+            textSize = 16f
+            isChecked = isStreamOnlyEnabled
+            setPadding(10, 25, 10, 10)
+            setOnCheckedChangeListener { _, isChecked ->
+                isStreamOnlyEnabled = isChecked
+                prefs.edit().putBoolean("STREAM_ONLY_MODE", isChecked).apply()
+            }
+        }
+
+        val descStreamOnly = TextView(this).apply {
+            text = "Activado: reproduce solo por internet sin guardar archivos. Desactivado: reproduce al instante y descarga en segundo plano."
+            textSize = 12f
+            alpha = 0.75f
+            setPadding(10, 0, 10, 25)
+        }
+
+        val swAutoVideo = Switch(this).apply {
+            text = "Descargar videoclip automáticamente"
+            textSize = 16f
+            isChecked = isAutoDownloadVideoEnabled
+            setPadding(10, 20, 10, 20)
+            setOnCheckedChangeListener { _, isChecked ->
+                isAutoDownloadVideoEnabled = isChecked
+                prefs.edit().putBoolean("AUTO_DOWNLOAD_VIDEO", isChecked).apply()
+            }
+        }
+
+        container.addView(swStreamOnly)
+        container.addView(descStreamOnly)
+        container.addView(swAutoVideo)
+
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Opciones de descargas")
+            .setView(container)
+            .setPositiveButton("Listo", null)
+            .show()
+    }
+
+    private fun getCachedStreams(ytUrl: String): CachedStream? {
+        val entry = streamCache[ytUrl] ?: return null
+        val tresHorasMs = 3L * 60L * 60L * 1000L
+        return if (System.currentTimeMillis() - entry.timestampMs < tresHorasMs) {
+            entry
+        } else {
+            streamCache.remove(ytUrl)
+            null
+        }
+    }
+
+    private suspend fun resolveDirectAudioStreamUrl(ytUrl: String): String? = withContext(Dispatchers.IO) {
+        getCachedStreams(ytUrl)?.audioUrl?.let { return@withContext it }
+
+        try {
+            val req = YoutubeDLRequest(ytUrl).apply {
+                addOption("--extractor-args", "youtube:player_client=android,web")
+                addOption("--no-playlist")
+                addOption("--no-warnings")
+                addOption("-f", "bestaudio[ext=m4a]/bestaudio/best")
+                addOption("--get-url")
+            }
+            val response = YoutubeDL.getInstance().execute(req, null, null)
+            val audioUrl = response.out
+                ?.lineSequence()
+                ?.map { it.trim() }
+                ?.firstOrNull { it.startsWith("http://") || it.startsWith("https://") }
+
+            if (audioUrl != null) {
+                val prev = getCachedStreams(ytUrl)
+                streamCache[ytUrl] = CachedStream(
+                    audioUrl = audioUrl,
+                    videoUrl = prev?.videoUrl,
+                    timestampMs = System.currentTimeMillis()
+                )
+            }
+            audioUrl
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private suspend fun resolveDirectVideoStreamUrl(ytUrl: String): String? = withContext(Dispatchers.IO) {
+        getCachedStreams(ytUrl)?.videoUrl?.let { return@withContext it }
+
+        try {
+            val req = YoutubeDLRequest(ytUrl).apply {
+                addOption("--extractor-args", "youtube:player_client=android,web")
+                addOption("--no-playlist")
+                addOption("--no-warnings")
+                addOption("-f", "bestvideo[height<=480][ext=mp4]/bestvideo[height<=480]/best[height<=480]/best")
+                addOption("--get-url")
+            }
+            val response = YoutubeDL.getInstance().execute(req, null, null)
+            val videoUrl = response.out
+                ?.lineSequence()
+                ?.map { it.trim() }
+                ?.firstOrNull { it.startsWith("http://") || it.startsWith("https://") }
+
+            if (videoUrl != null) {
+                val prev = getCachedStreams(ytUrl)
+                streamCache[ytUrl] = CachedStream(
+                    audioUrl = prev?.audioUrl,
+                    videoUrl = videoUrl,
+                    timestampMs = System.currentTimeMillis()
+                )
+            }
+            videoUrl
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    
+
+    private fun reproducirDesdeYoutube(
+        vid: String,
+        vtitle: String,
+        vthumb: String,
+        origen: String,
+        irAInicio: Boolean
+    ) {
+        if (vid.isEmpty()) return
+        val ytUrl = "https://www.youtube.com/watch?v=$vid"
+        val soloInternet = isStreamOnlyEnabled
+
+        Toast.makeText(
+            this,
+            if (soloInternet) "Cargando audio en streaming..." else "Reproduciendo y descargando en segundo plano...",
+            Toast.LENGTH_SHORT
+        ).show()
+
+        lifecycleScope.launch {
+            val streamUrl = resolveDirectAudioStreamUrl(ytUrl)
+            if (streamUrl != null) {
+                lifecycleScope.launch { resolveDirectVideoStreamUrl(ytUrl) }
+            }
+            var liveEntry: String? = null
+
+            if (streamUrl != null) {
+                val safeTitle = vtitle.replace("|", "-").trim()
+                liveEntry = "LIVE_STREAM|$streamUrl|$safeTitle|$vthumb|$ytUrl"
+                resetLoopState()
+                nombrePlaylistActual = origen
+                playlistActual = mutableListOf(liveEntry)
+                currentIndex = 0
+                if (::queueAdapter.isInitialized) queueAdapter.updateList(playlistActual)
+                reproducirCancionActual()
+                if (irAInicio) {
+                    cambiarPestana(0)
+                } else {
+                    sectionHome.smoothScrollTo(0, 0)
+                }
+            } else if (soloInternet) {
+                Toast.makeText(this@MainActivity, "No se pudo obtener el audio en streaming", Toast.LENGTH_SHORT).show()
+                return@launch
+            }
+
+            if (!soloInternet) {
+                val destFolder = File(getExternalFilesDir(null), "Base-Musica/Recien agregados").apply { mkdirs() }
+                viewModel.loadLocalMusic()
+                viewModel.downloadSingleTrack(ytUrl, "Recien agregados") { success ->
+                    if (success) {
+                        autoDownloadMatchingVideo(ytUrl, destFolder)
+                        viewModel.loadLocalMusic()
+
+                        val audioFiles = destFolder.listFiles { file ->
+                            file.isFile && (file.extension.equals("m4a", true) ||
+                                file.extension.equals("mp3", true) ||
+                                file.extension.equals("webm", true))
+                        }?.sortedByDescending { it.lastModified() }
+
+                        val downloadedFile = audioFiles?.firstOrNull()
+                        if (downloadedFile != null) {
+                            if (liveEntry == null) {
+                                resetLoopState()
+                                nombrePlaylistActual = "Recien agregados"
+                                playlistActual = audioFiles.map { it.absolutePath }.toMutableList()
+                                currentIndex = playlistActual.indexOf(downloadedFile.absolutePath).coerceAtLeast(0)
+                                if (::queueAdapter.isInitialized) queueAdapter.updateList(playlistActual)
+                                reproducirCancionActual()
+                                if (irAInicio) cambiarPestana(0) else sectionHome.smoothScrollTo(0, 0)
+                            } else {
+                                val idxInQueue = playlistActual.indexOf(liveEntry)
+                                if (idxInQueue >= 0) {
+                                    playlistActual[idxInQueue] = downloadedFile.absolutePath
+                                    if (::queueAdapter.isInitialized) queueAdapter.notifyItemChanged(idxInQueue)
+                                }
+                                Toast.makeText(this@MainActivity, "Descarga guardada en 'Recien agregados'", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    } else {
+                        Toast.makeText(this@MainActivity, "Error al descargar canción", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        }
     }
 
     private fun autoDownloadMatchingVideo(ytUrl: String, destFolder: File) {
@@ -1564,16 +1760,51 @@ class MainActivity : AppCompatActivity() {
 
         val currentPath = playlistActual[currentIndex]
         val videoFile = findLocalVideoForTrack(currentPath)
-        val currentBaseName = if (currentPath.startsWith("LIVE_STREAM|")) "" else File(currentPath).nameWithoutExtension
-        val isDownloadingThis = isDownloadingClip || (currentBaseName.isNotEmpty() && activeVideoDownloads.contains(currentBaseName))
-
-        if (videoFile == null) {
-            tvOverlayLayout.visibility = View.VISIBLE
-            txtTvStatus.text = if (isDownloadingThis) "DESCARGANDO VIDEOCLIP..." else "SIN SEÑAL DE VIDEO"
-            btnDownloadClip.visibility = if (isDownloadingThis) View.GONE else View.VISIBLE
+        if (videoFile != null) {
+            iniciarReproduccionVideoEnTv(videoFile.absolutePath)
             return
         }
 
+        if (currentPath.startsWith("LIVE_STREAM|")) {
+            val ytUrl = currentPath.split("|").getOrNull(4).orEmpty()
+            if (ytUrl.isNotEmpty()) {
+                val cachedVideoUrl = getCachedStreams(ytUrl)?.videoUrl
+                if (cachedVideoUrl != null) {
+                    iniciarReproduccionVideoEnTv(cachedVideoUrl)
+                    return
+                }
+
+                tvOverlayLayout.visibility = View.VISIBLE
+                txtTvStatus.text = "CARGANDO VIDEOCLIP..."
+                btnDownloadClip.visibility = View.GONE
+
+                videoStreamJob?.cancel()
+                videoStreamJob = lifecycleScope.launch {
+                    val streamVideoUrl = resolveDirectVideoStreamUrl(ytUrl)
+                    if (streamVideoUrl != null) {
+                        if (isTvMode && playlistActual.getOrNull(currentIndex) == currentPath) {
+                            iniciarReproduccionVideoEnTv(streamVideoUrl)
+                        }
+                    } else if (isTvMode && playlistActual.getOrNull(currentIndex) == currentPath) {
+                        tvOverlayLayout.visibility = View.VISIBLE
+                        txtTvStatus.text = "SIN SEÑAL DE VIDEO"
+                        btnDownloadClip.visibility = View.VISIBLE
+                    }
+                }
+                return
+            }
+        }
+
+        val currentBaseName = if (currentPath.startsWith("LIVE_STREAM|")) "" else File(currentPath).nameWithoutExtension
+        val isDownloadingThis = isDownloadingClip || (currentBaseName.isNotEmpty() && activeVideoDownloads.contains(currentBaseName))
+
+        tvOverlayLayout.visibility = View.VISIBLE
+        txtTvStatus.text = if (isDownloadingThis) "DESCARGANDO VIDEOCLIP..." else "SIN SEÑAL DE VIDEO"
+        btnDownloadClip.visibility = if (isDownloadingThis) View.GONE else View.VISIBLE
+    }
+
+    private fun iniciarReproduccionVideoEnTv(videoSource: String) {
+        if (!isTvMode) return
         tvOverlayLayout.visibility = View.GONE
         if (!tvTextureView.isAvailable) return
 
@@ -1581,11 +1812,12 @@ class MainActivity : AppCompatActivity() {
             if (videoSurface == null && tvTextureView.surfaceTexture != null) {
                 videoSurface = Surface(tvTextureView.surfaceTexture)
             }
+            videoMediaPlayer?.release()
             videoMediaPlayer = MediaPlayer().apply {
                 setSurface(videoSurface)
                 setVolume(0f, 0f)
                 isLooping = this@MainActivity.isLooping
-                setDataSource(videoFile.absolutePath)
+                setDataSource(videoSource)
                 setOnVideoSizeChangedListener { _, _, _ ->
                     adjustVideoAspectRatio(tvTextureView.width, tvTextureView.height)
                 }
@@ -1728,6 +1960,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun releaseVideoPlayer() {
+        videoStreamJob?.cancel()
+        videoStreamJob = null
         liveThemeAnimator?.cancel()
         liveVideoThemeController?.stopAndRestore(currentTheme.accent, currentTheme.w2c1)
         isVideoPrepared = false
