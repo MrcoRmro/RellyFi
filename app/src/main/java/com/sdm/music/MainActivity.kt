@@ -367,6 +367,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var txtSearchHeader: TextView
     private lateinit var inputYtSearch: EditText
     private lateinit var btnDoSearch: Button
+    private lateinit var btnDownloadPlaylist: Button
+    private lateinit var txtDownloadQueueStatus: TextView
     private lateinit var resultContainer: LinearLayout
     private lateinit var txtSettingsHeader: TextView
     private lateinit var switchCrossfade: Switch
@@ -578,6 +580,20 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+
+        lifecycleScope.launch {
+            viewModel.pendingDownloadsCount.collect { count ->
+                if (::txtDownloadQueueStatus.isInitialized) {
+                    if (count > 0) {
+                        txtDownloadQueueStatus.visibility = View.VISIBLE
+                        txtDownloadQueueStatus.text = "📥 Cola de descargas: $count canciones pendientes en segundo plano"
+                    } else {
+                        txtDownloadQueueStatus.visibility = View.GONE
+                        viewModel.loadLocalMusic()
+                    }
+                }
+            }
+        }
     }
 
     private fun getGlassDrawable(isDark: Boolean): GradientDrawable { val glassColor = if (isDark) Color.parseColor("#4D000000") else Color.parseColor("#66FFFFFF"); val strokeColor = if (isDark) Color.parseColor("#33FFFFFF") else Color.parseColor("#33000000"); return GradientDrawable().apply { setColor(glassColor); cornerRadius = 30f; setStroke(2, strokeColor) } }
@@ -625,6 +641,14 @@ class MainActivity : AppCompatActivity() {
         txtSearchHeader.applyContrastingText(t.isDark)
         inputYtSearch.applyContrastingInput(t.isDark); inputYtSearch.background = getGlassDrawable(t.isDark)
         btnDoSearch.applyContrastingText(t.isDark); resultContainer.background = getGlassDrawable(t.isDark)
+        if (::btnDownloadPlaylist.isInitialized) {
+            btnDownloadPlaylist.applyContrastingText(t.isDark)
+            btnDownloadPlaylist.background = getGlassDrawable(t.isDark)
+        }
+        if (::txtDownloadQueueStatus.isInitialized) {
+            txtDownloadQueueStatus.applyContrastingText(t.isDark)
+            txtDownloadQueueStatus.background = getGlassDrawable(t.isDark)
+        }
         
         txtSettingsHeader.applyContrastingText(t.isDark)
         switchCrossfade.applyContrastingText(t.isDark)
@@ -856,8 +880,28 @@ class MainActivity : AppCompatActivity() {
             })
         }
         btnDoSearch = Button(this).apply { text = "BUSCAR"; setBackgroundColor(Color.TRANSPARENT) }
+        btnDownloadPlaylist = Button(this).apply {
+            text = "📥 Descargar Playlist por Enlace"
+            isAllCaps = false
+            textSize = 13f
+            setPadding(30, 20, 30, 20)
+            setOnClickListener { mostrarDialogoDescargaPlaylist() }
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 0, 10) }
+        }
+        txtDownloadQueueStatus = TextView(this).apply {
+            textSize = 13f
+            gravity = Gravity.CENTER
+            setPadding(30, 20, 30, 20)
+            visibility = View.GONE
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 0, 10) }
+        }
         resultContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 20, 0, 40) }; visibility = View.GONE }
-        sectionSearch.addView(txtSearchHeader); sectionSearch.addView(inputYtSearch); sectionSearch.addView(btnDoSearch); val searchScroll = ScrollView(this).apply {
+        sectionSearch.addView(txtSearchHeader)
+        sectionSearch.addView(inputYtSearch)
+        sectionSearch.addView(btnDoSearch)
+        sectionSearch.addView(btnDownloadPlaylist)
+        sectionSearch.addView(txtDownloadQueueStatus)
+        val searchScroll = ScrollView(this).apply {
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
             overScrollMode = View.OVER_SCROLL_NEVER
             isVerticalScrollBarEnabled = false
@@ -868,9 +912,16 @@ class MainActivity : AppCompatActivity() {
         
 
         btnDoSearch.setOnClickListener {
-        val q = inputYtSearch.text.toString().trim()
-        if (q.isEmpty()) return@setOnClickListener
-        btnDoSearch.text = "BUSCANDO..."
+            val q = inputYtSearch.text.toString().trim()
+            if (q.isEmpty()) return@setOnClickListener
+
+            // Detección automática de enlaces de Playlist
+            if (q.contains("list=", ignoreCase = true) || q.contains("playlist", ignoreCase = true)) {
+                mostrarDialogoDescargaPlaylist(q)
+                return@setOnClickListener
+            }
+
+            btnDoSearch.text = "BUSCANDO..."
         lifecycleScope.launch {
             val results = YtDlpRepository(this@MainActivity).searchYoutube(q, 5)
             resultContainer.removeAllViews()
@@ -1058,6 +1109,67 @@ class MainActivity : AppCompatActivity() {
             folderRow.addView(btnEdit)
             folderWrapper.addView(waveView); folderWrapper.addView(folderRow); playlistFoldersContainer.addView(folderWrapper)
         }
+    }
+
+    private fun mostrarDialogoDescargaPlaylist(initialUrl: String = "") {
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(50, 40, 50, 40)
+        }
+        val inputUrl = EditText(this).apply {
+            hint = "Enlace de la playlist (YouTube)"
+            applyContrastingInput(currentTheme.isDark)
+            if (initialUrl.isNotEmpty()) setText(initialUrl)
+        }
+        val inputFolder = EditText(this).apply {
+            hint = "Nombre de carpeta destino (opcional)"
+            applyContrastingInput(currentTheme.isDark)
+        }
+        container.addView(inputUrl)
+        container.addView(inputFolder)
+
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Descargar Playlist Inteligente")
+            .setMessage("Se registrarán las canciones en la cola persistente sin descargar audio de inmediato. Luego WorkManager las descargará una a una en segundo plano.")
+            .setView(container)
+            .setPositiveButton("Registrar y Descargar") { _, _ ->
+                val url = inputUrl.text.toString().trim()
+                val folder = inputFolder.text.toString().trim().takeIf { it.isNotBlank() }
+                if (url.isEmpty()) {
+                    Toast.makeText(this, "Por favor ingresa un enlace válido", Toast.LENGTH_SHORT).show()
+                    return@setPositiveButton
+                }
+
+                val progressDialog = androidx.appcompat.app.AlertDialog.Builder(this)
+                    .setTitle("Analizando Playlist")
+                    .setMessage("Extrayendo lista de canciones sin descargar...")
+                    .setCancelable(false)
+                    .create()
+                progressDialog.show()
+
+                viewModel.registerPlaylistForDownload(
+                    playlistUrl = url,
+                    folderName = folder,
+                    onStatus = { status ->
+                        progressDialog.setMessage(status)
+                    },
+                    onFinished = { count, folderName ->
+                        try { if (progressDialog.isShowing) progressDialog.dismiss() } catch (e: Exception) {}
+                        if (count > 0) {
+                            androidx.appcompat.app.AlertDialog.Builder(this)
+                                .setTitle("✅ Playlist Registrada")
+                                .setMessage("Se añadieron $count canciones a la cola de SQLite.\n\nLa descarga se procesará una a una en segundo plano con notificación activa. Si se corta internet o se cierra la app, se reanudará automáticamente.")
+                                .setPositiveButton("Entendido", null)
+                                .show()
+                            viewModel.loadLocalMusic()
+                        } else {
+                            Toast.makeText(this, "❌ $folderName", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                )
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
     }
 
     private fun mostrarDialogoCrear() { 

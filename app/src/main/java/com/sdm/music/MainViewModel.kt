@@ -20,7 +20,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val musicRepo = MusicRepository(application)
     private val ytRepo = YtDlpRepository(application)
     private val fypCacheDao: FypCacheDao = AppDatabase.getInstance(application).fypCacheDao()
+    private val downloadDao: DownloadDao = AppDatabase.getInstance(application).downloadDao()
     private var lastFypArtist: String = ""
+
+    val pendingDownloadsCount = downloadDao.getPendingCountFlow()
+    val downloadQueue = downloadDao.getAllFlow()
 
     private val _playlists = MutableStateFlow<Map<String, List<String>>>(emptyMap())
     val playlists: StateFlow<Map<String, List<String>>> = _playlists
@@ -57,6 +61,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             file.delete()
                         }
                     }
+                }
+                // Si quedaron canciones pendientes en SQLite, reactivar el trabajador de WorkManager
+                val pending = downloadDao.getNextPending()
+                if (pending != null) {
+                    PlaylistDownloadWorker.enqueueWork(getApplication())
                 }
             } catch (e: Exception) { }
         }
@@ -264,6 +273,57 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 withContext(Dispatchers.Main) { onResult(true) }
             } catch (e: Exception) {
                 withContext(Dispatchers.Main) {  }
+            }
+        }
+    }
+
+    // Registro previo de Playlist inteligente (cola en SQLite sin descargar)
+    fun registerPlaylistForDownload(
+        playlistUrl: String,
+        folderName: String? = null,
+        onStatus: ((String) -> Unit)? = null,
+        onFinished: ((Int, String) -> Unit)? = null
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                withContext(Dispatchers.Main) { onStatus?.invoke("Leyendo lista de canciones...") }
+
+                // 1. Lectura rápida sin descargar audio
+                val (playlistTitle, tracks) = ytRepo.extractPlaylistTracks(playlistUrl)
+
+                if (tracks.isEmpty()) {
+                    withContext(Dispatchers.Main) { onFinished?.invoke(0, "No se encontraron canciones en el enlace") }
+                    return@launch
+                }
+
+                val finalFolderName = if (!folderName.isNullOrBlank()) folderName.trim() else playlistTitle.replace("/", "_").trim()
+
+                // 2. Guardar en SQLite con estado PENDIENTE
+                val entities = tracks.map { track ->
+                    val vid = track["id"] ?: ""
+                    DownloadItemEntity(
+                        playlistName = finalFolderName,
+                        playlistUrl = playlistUrl,
+                        videoId = vid,
+                        videoUrl = "https://www.youtube.com/watch?v=$vid",
+                        title = track["title"] ?: "Canción",
+                        thumbnail = track["thumbnail"] ?: "",
+                        status = "PENDIENTE"
+                    )
+                }
+
+                downloadDao.insertAll(entities)
+
+                // 3. Delegar la descarga a WorkManager con Foreground Service
+                PlaylistDownloadWorker.enqueueWork(getApplication())
+
+                withContext(Dispatchers.Main) {
+                    onFinished?.invoke(entities.size, finalFolderName)
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    onFinished?.invoke(0, "Error: ${e.message}")
+                }
             }
         }
     }

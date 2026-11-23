@@ -102,6 +102,49 @@ class YtDlpRepository(private val context: Context) {
         return getSongRecommendations("$artist Mix", limit)
     }
 
+    // Extracción ultra rápida de lista de reproducción sin descargar audio
+    suspend fun extractPlaylistTracks(playlistUrl: String): Pair<String, List<Map<String, String>>> = withContext(Dispatchers.IO) {
+        val tracks = mutableListOf<Map<String, String>>()
+        var playlistTitle = "Playlist Descargada"
+        try {
+            ensureInitialized()
+            val request = YoutubeDLRequest(playlistUrl)
+            request.addOption("--dump-json")
+            request.addOption("--flat-playlist") // Rápida lectura sin descargar
+            request.addOption("--no-warnings")
+            request.addOption("--ignore-errors")
+
+            val response = YoutubeDL.getInstance().execute(request, null, null)
+            val lines = response.out.split("\n")
+            for (line in lines) {
+                if (line.isNotBlank() && line.startsWith("{")) {
+                    try {
+                        val data = JSONObject(line)
+                        val id = data.optString("id", "")
+                        val title = data.optString("title", "Pista Desconocida")
+                        var thumb = data.optString("thumbnail", "")
+                        if (data.has("thumbnails")) {
+                            val thumbsArray = data.getJSONArray("thumbnails")
+                            if (thumbsArray.length() > 0) {
+                                thumb = thumbsArray.getJSONObject(thumbsArray.length() - 1).optString("url", thumb)
+                            }
+                        }
+                        val pTitle = data.optString("playlist_title", "")
+                        if (pTitle.isNotBlank() && playlistTitle == "Playlist Descargada") {
+                            playlistTitle = pTitle
+                        }
+                        if (id.isNotEmpty()) {
+                            tracks.add(mapOf("id" to id, "title" to title, "thumbnail" to thumb))
+                        }
+                    } catch (e: Exception) {}
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("YtDlpRepository", "Error extrayendo playlist: ${e.message}", e)
+        }
+        Pair(playlistTitle, tracks)
+    }
+
     suspend fun getStreamUrl(videoId: String): String = withContext(Dispatchers.IO) {
         try {
             ensureInitialized()
