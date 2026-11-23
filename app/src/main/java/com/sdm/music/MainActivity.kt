@@ -22,11 +22,14 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.GestureDetector
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.Surface
+import android.view.TextureView
 import android.view.View
 import android.view.ViewConfiguration
 import android.view.ViewGroup
@@ -34,15 +37,15 @@ import android.view.ViewOutlineProvider
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import androidx.coordinatorlayout.widget.CoordinatorLayout
+import androidx.core.graphics.ColorUtils
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
+import androidx.palette.graphics.Palette
 import androidx.recyclerview.widget.ItemTouchHelper
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
-import androidx.palette.graphics.Palette
-import androidx.core.graphics.ColorUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -50,6 +53,7 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.hypot
 import kotlin.math.min
 import kotlin.math.sin
@@ -339,7 +343,15 @@ class MainActivity : AppCompatActivity() {
     private lateinit var itemTouchHelper: ItemTouchHelper
     
     private lateinit var txtPlayingFrom: TextView
+    private lateinit var mediaStageContainer: FrameLayout
     private lateinit var imgVinyl: VinylDiskView
+    private lateinit var tvContainer: FrameLayout
+    private lateinit var tvTextureView: TextureView
+    private lateinit var tvStaticView: TvStaticView
+    private lateinit var tvOverlayLayout: LinearLayout
+    private lateinit var txtTvStatus: TextView
+    private lateinit var btnDownloadClip: Button
+    private lateinit var txtTvBadge: TextView
     private lateinit var txtTitle: TextView
     private lateinit var txtArtist: TextView
     private lateinit var wavySeekBar: WavySeekBar
@@ -373,6 +385,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var txtSettingsHeader: TextView
     private lateinit var switchCrossfade: Switch
     private lateinit var switchDynamicTheme: Switch
+    private lateinit var switchAutoVideo: Switch
     private lateinit var btnSleepTimer: Button
     private lateinit var btnCambiarTema: Button
     
@@ -384,6 +397,17 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnSettingsNav: Button
 
     private var mediaPlayer: MediaPlayer? = null
+    private var videoMediaPlayer: MediaPlayer? = null
+    private var videoSurface: Surface? = null
+    private var isTvMode: Boolean = false
+    private var isVideoPrepared: Boolean = false
+    private var isDownloadingClip: Boolean = false
+    private var isAutoDownloadVideoEnabled: Boolean = true
+    private val activeVideoDownloads = ConcurrentHashMap.newKeySet<String>()
+    private var liveVideoThemeController: LiveVideoThemeController? = null
+    private var liveThemeAnimator: ValueAnimator? = null
+    private var lastLiveThemeUpdateMs: Long = 0L
+    private var hasPendingFullUiSync: Boolean = false
     private var isCrossfadeEnabled: Boolean = false
     private var mapPlaylists: MutableMap<String, List<String>> = mutableMapOf()
     private var playlistActual: MutableList<String> = mutableListOf()
@@ -407,7 +431,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
         
-        // Cargar ViewModel usando el Provider (Arquitectura limpia)
         viewModel = ViewModelProvider(this)[MainViewModel::class.java]
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) { if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1) }
@@ -429,6 +452,7 @@ class MainActivity : AppCompatActivity() {
         mediaSession.isActive = true
         prefs = getSharedPreferences("SDM_SESSION", Context.MODE_PRIVATE)
         isCrossfadeEnabled = prefs.getBoolean("CROSSFADE", false)
+        isAutoDownloadVideoEnabled = prefs.getBoolean("AUTO_DOWNLOAD_VIDEO", true)
         val savedThemeName = prefs.getString("APP_THEME", "Blanco con rojo") ?: "Blanco con rojo"
         currentTheme = THEMES[savedThemeName] ?: THEMES["Blanco con rojo"]!!
         
@@ -440,22 +464,67 @@ class MainActivity : AppCompatActivity() {
         updateUIColors(currentTheme)
         setContentView(mainLayout)
 
-        // Observadores del ViewModel (Reemplazan la lógica de Sincronización)
+        liveVideoThemeController = LiveVideoThemeController(lifecycleScope) { primary, secondary, _, _ ->
+            if (isTvMode && isDynamicThemeEnabled && isVideoPrepared) {
+                val now = SystemClock.elapsedRealtime()
+                if (now - lastLiveThemeUpdateMs < 500L) return@LiveVideoThemeController
+                lastLiveThemeUpdateMs = now
+
+                val isDark = ColorUtils.calculateLuminance(secondary) < 0.35
+                val bgBase = if (isDark) {
+                    ColorUtils.blendARGB(secondary, Color.parseColor("#111111"), 0.75f)
+                } else {
+                    ColorUtils.blendARGB(secondary, Color.WHITE, 0.80f)
+                }
+                val cardBg = if (isDark) {
+                    ColorUtils.blendARGB(secondary, Color.parseColor("#1A1A1A"), 0.65f)
+                } else {
+                    ColorUtils.blendARGB(Color.WHITE, primary, 0.07f)
+                }
+                val accentLight = if (isDark) {
+                    ColorUtils.blendARGB(primary, Color.parseColor("#222222"), 0.60f)
+                } else {
+                    ColorUtils.blendARGB(primary, Color.WHITE, 0.65f)
+                }
+                val primaryLum = ColorUtils.calculateLuminance(primary)
+                val bgLum = ColorUtils.calculateLuminance(bgBase)
+                val textColor = if (bgLum > 0.4) Color.BLACK else Color.WHITE
+
+                val liveTheme = ThemeColors(
+                    bgBase = bgBase,
+                    w1c1 = ColorUtils.blendARGB(primary, secondary, 0.3f),
+                    w1c2 = ColorUtils.blendARGB(primary, bgBase, 0.4f),
+                    w2c1 = secondary,
+                    w2c2 = ColorUtils.blendARGB(secondary, bgBase, 0.5f),
+                    w3c = ColorUtils.blendARGB(secondary, bgBase, 0.75f),
+                    textPrimary = textColor,
+                    textSecondary = textColor,
+                    accent = primary,
+                    accentDark = if (primaryLum > 0.5) ColorUtils.blendARGB(primary, Color.BLACK, 0.4f) else primary,
+                    accentLight = accentLight,
+                    cardBg = cardBg,
+                    navBg = ColorUtils.setAlphaComponent(bgBase, 204),
+                    isDark = isDark
+                )
+                animateLiveVideoTheme(liveTheme)
+            }
+        }
+
         lifecycleScope.launch {
             viewModel.playlists.collect { playlists ->
                 mapPlaylists = playlists.toMutableMap()
                 val fRecien = java.io.File(getExternalFilesDir(null), "Base-Musica/Recien agregados")
-        var tempMap = mapPlaylists.toMutableMap()
-        if (fRecien.exists() && !tempMap.containsKey("Recien agregados")) {
-            tempMap["Recien agregados"] = emptyList()
-        }
-        viewModel.downloadProgress.value.keys.forEach {
-            if (!tempMap.containsKey(it)) {
-                tempMap[it] = emptyList()
-            }
-        }
-        mapPlaylists = tempMap
-        renderizarListaDeCarpetas()
+                var tempMap = mapPlaylists.toMutableMap()
+                if (fRecien.exists() && !tempMap.containsKey("Recien agregados")) {
+                    tempMap["Recien agregados"] = emptyList()
+                }
+                viewModel.downloadProgress.value.keys.forEach {
+                    if (!tempMap.containsKey(it)) {
+                        tempMap[it] = emptyList()
+                    }
+                }
+                mapPlaylists = tempMap
+                renderizarListaDeCarpetas()
                 if (playlistActual.isEmpty() && mapPlaylists.isNotEmpty()) {
                     val primera = mapPlaylists.keys.first()
                     nombrePlaylistActual = primera
@@ -469,7 +538,7 @@ class MainActivity : AppCompatActivity() {
             viewModel.fypRecommendations.collect { recs ->
                 fypContainer.removeAllViews()
                 if (recs.isEmpty()) return@collect
-                txtFypHeader.text = "🔥 Canciones recomendadas"
+                txtFypHeader.text = "Canciones recomendadas"
                 txtFypHeader.applyContrastingText(currentTheme.isDark)
                 for (item in recs) {
                     val vid = item["id"] ?: ""
@@ -506,22 +575,15 @@ class MainActivity : AppCompatActivity() {
                     row.setOnClickListener {
                         val ytUrl = "https://www.youtube.com/watch?v=$vid"
                         
-                        val cartel = androidx.appcompat.app.AlertDialog.Builder(this@MainActivity)
-                            .setTitle("Descargando canción")
-                            .setMessage("Descargando \"$vtitle\" en 'Recien agregados'...\nSe reproducirá al terminar.")
-                            .setCancelable(false)
-                            .setNegativeButton("Ocultar") { d, _ -> d.dismiss() }
-                            .create()
-                        cartel.show()
+                        android.widget.Toast.makeText(this@MainActivity, "Descargando, se reproducirá al terminar", android.widget.Toast.LENGTH_SHORT).show()
                         
                         val destFolder = java.io.File(getExternalFilesDir(null), "Base-Musica/Recien agregados").apply { mkdirs() }
                         viewModel.loadLocalMusic()
                         
                         viewModel.downloadSingleTrack(ytUrl, "Recien agregados") { success ->
-                            try { if (cartel.isShowing) cartel.dismiss() } catch (e: Exception) {}
-                            
                             if (success) {
-                                android.widget.Toast.makeText(this@MainActivity, "✅ ¡Descarga completa! Reproduciendo...", android.widget.Toast.LENGTH_SHORT).show()
+                                autoDownloadMatchingVideo(ytUrl, destFolder)
+                                android.widget.Toast.makeText(this@MainActivity, "¡Descarga completa! Reproduciendo...", android.widget.Toast.LENGTH_SHORT).show()
                                 val audioFiles = destFolder.listFiles { file ->
                                     file.isFile && (file.extension.equals("m4a", true) || 
                                                     file.extension.equals("mp3", true) || 
@@ -540,7 +602,7 @@ class MainActivity : AppCompatActivity() {
                                     sectionHome.smoothScrollTo(0, 0)
                                 }
                             } else {
-                                android.widget.Toast.makeText(this@MainActivity, "❌ Error al descargar canción", android.widget.Toast.LENGTH_SHORT).show()
+                                android.widget.Toast.makeText(this@MainActivity, "Error al descargar canción", android.widget.Toast.LENGTH_SHORT).show()
                             }
                         }
                     }
@@ -572,7 +634,7 @@ class MainActivity : AppCompatActivity() {
                     txtFypHeader.text = "Buscando recomendaciones..."
                     txtFypHeader.applyContrastingText(currentTheme.isDark)
                     fypContainer.addView(TextView(this@MainActivity).apply { 
-                        text = "🎵 Analizando canción y buscando recomendaciones..."; 
+                        text = "Analizando canción y buscando recomendaciones..."; 
                         gravity = Gravity.CENTER; 
                         setPadding(0, 40, 0, 40); 
                         applyContrastingText(currentTheme.isDark) 
@@ -586,7 +648,7 @@ class MainActivity : AppCompatActivity() {
                 if (::txtDownloadQueueStatus.isInitialized) {
                     if (count > 0) {
                         txtDownloadQueueStatus.visibility = View.VISIBLE
-                        txtDownloadQueueStatus.text = "📥 Cola de descargas: $count canciones pendientes en segundo plano"
+                        txtDownloadQueueStatus.text = "Cola de descargas: $count canciones pendientes en segundo plano"
                     } else {
                         txtDownloadQueueStatus.visibility = View.GONE
                         viewModel.loadLocalMusic()
@@ -599,6 +661,7 @@ class MainActivity : AppCompatActivity() {
     private fun getGlassDrawable(isDark: Boolean): GradientDrawable { val glassColor = if (isDark) Color.parseColor("#4D000000") else Color.parseColor("#66FFFFFF"); val strokeColor = if (isDark) Color.parseColor("#33FFFFFF") else Color.parseColor("#33000000"); return GradientDrawable().apply { setColor(glassColor); cornerRadius = 30f; setStroke(2, strokeColor) } }
 
     private fun animateThemeTransition(newTheme: ThemeColors) {
+        liveThemeAnimator?.cancel()
         val oldTheme = currentTheme; val animator = ValueAnimator.ofFloat(0f, 1f); animator.duration = 600; val eval = ArgbEvaluator()
         animator.addUpdateListener { anim ->
             val f = anim.animatedFraction
@@ -612,7 +675,84 @@ class MainActivity : AppCompatActivity() {
         animator.start(); currentTheme = newTheme
     }
 
+    private fun animateLiveVideoTheme(newTheme: ThemeColors) {
+        liveThemeAnimator?.cancel()
+        hasPendingFullUiSync = true
+        val startTheme = currentTheme
+        val eval = ArgbEvaluator()
+        liveThemeAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 450L
+            addUpdateListener { anim ->
+                val f = anim.animatedFraction
+                val stepTheme = ThemeColors(
+                    bgBase = eval.evaluate(f, startTheme.bgBase, newTheme.bgBase) as Int,
+                    w1c1 = eval.evaluate(f, startTheme.w1c1, newTheme.w1c1) as Int,
+                    w1c2 = eval.evaluate(f, startTheme.w1c2, newTheme.w1c2) as Int,
+                    w2c1 = eval.evaluate(f, startTheme.w2c1, newTheme.w2c1) as Int,
+                    w2c2 = eval.evaluate(f, startTheme.w2c2, newTheme.w2c2) as Int,
+                    w3c = eval.evaluate(f, startTheme.w3c, newTheme.w3c) as Int,
+                    textPrimary = newTheme.textPrimary,
+                    textSecondary = newTheme.textSecondary,
+                    accent = eval.evaluate(f, startTheme.accent, newTheme.accent) as Int,
+                    accentDark = eval.evaluate(f, startTheme.accentDark, newTheme.accentDark) as Int,
+                    accentLight = eval.evaluate(f, startTheme.accentLight, newTheme.accentLight) as Int,
+                    cardBg = eval.evaluate(f, startTheme.cardBg, newTheme.cardBg) as Int,
+                    navBg = eval.evaluate(f, startTheme.navBg, newTheme.navBg) as Int,
+                    isDark = newTheme.isDark
+                )
+                currentTheme = stepTheme
+                updateLiveThemeColors(stepTheme)
+            }
+            start()
+        }
+    }
+
+    private fun updateLiveThemeColors(t: ThemeColors) {
+        waveBackgroundView.theme = t
+        wavySeekBar.setColors(t.accentLight, t.accent, t.accentDark)
+
+        (btnPrev.background as? GradientDrawable)?.setColor(t.accentLight)
+        (btnPlayPause.background as? GradientDrawable)?.setColor(t.accent)
+        (btnNext.background as? GradientDrawable)?.setColor(t.accentLight)
+        (bottomNavGlass.background as? GradientDrawable)?.setColor(t.navBg)
+
+        if (isLooping) {
+            (dotLoop.background as? GradientDrawable)?.setColor(t.accent)
+            dotLoop.invalidate()
+        }
+
+        val iconTint = if (t.isDark) Color.WHITE else Color.BLACK
+        btnPrev.setColorFilter(iconTint)
+        btnNext.setColorFilter(iconTint)
+
+        txtPlayingFrom.setTextColor(t.textPrimary)
+        txtTitle.setTextColor(t.textPrimary)
+        txtArtist.setTextColor(t.textSecondary)
+        txtCurrentTime.setTextColor(t.textPrimary)
+        txtTotalTime.setTextColor(t.textPrimary)
+        btnShuffle.setTextColor(t.textPrimary)
+        btnLoop.setTextColor(t.textPrimary)
+        btnHomeNav.setTextColor(t.textPrimary)
+        btnPlaylistsNav.setTextColor(t.textPrimary)
+        btnListNav.setTextColor(t.textPrimary)
+        btnSearchNav.setTextColor(t.textPrimary)
+        btnSettingsNav.setTextColor(t.textPrimary)
+
+        if (::btnAddToPlaylist.isInitialized) {
+            btnAddToPlaylist.setTextColor(t.textPrimary)
+            (btnAddToPlaylist.background as? GradientDrawable)?.setColor(
+                if (t.isDark) Color.parseColor("#4D000000") else Color.parseColor("#66FFFFFF")
+            )
+        }
+        if (::txtFypHeader.isInitialized) {
+            txtFypHeader.setTextColor(t.textPrimary)
+        }
+
+        btnFavRadial.themeColors = t
+    }
+
     private fun updateUIColors(t: ThemeColors) {
+        hasPendingFullUiSync = false
         waveBackgroundView.theme = t
         txtPlayingFrom.applyContrastingText(t.isDark); imgVinyl.holeColor = t.bgBase; txtTitle.applyContrastingText(t.isDark); txtArtist.applyContrastingText(t.isDark)
         wavySeekBar.setColors(t.accentLight, t.accent, t.accentDark); txtCurrentTime.applyContrastingText(t.isDark); txtTotalTime.applyContrastingText(t.isDark)
@@ -654,6 +794,9 @@ class MainActivity : AppCompatActivity() {
         switchCrossfade.applyContrastingText(t.isDark)
         if (::switchDynamicTheme.isInitialized) {
             switchDynamicTheme.applyContrastingText(t.isDark)
+        }
+        if (::switchAutoVideo.isInitialized) {
+            switchAutoVideo.applyContrastingText(t.isDark)
         }
         btnSleepTimer.background = getGlassDrawable(t.isDark); btnSleepTimer.applyContrastingText(t.isDark)
         btnCrearPlaylist.background = getGlassDrawable(t.isDark); btnCrearPlaylist.applyContrastingText(t.isDark)
@@ -729,7 +872,9 @@ class MainActivity : AppCompatActivity() {
             isVerticalScrollBarEnabled = false; isHorizontalScrollBarEnabled = false 
             onPageSelected = { page ->
                 actualizarNavActivo(page)
-                if (page == 2) {
+                if (page != 0 && hasPendingFullUiSync) {
+                    updateUIColors(currentTheme)
+                } else if (page == 2) {
                     queueAdapter.notifyDataSetChanged()
                 }
             }
@@ -744,12 +889,150 @@ class MainActivity : AppCompatActivity() {
         
         txtPlayingFrom = TextView(this).apply { text = "REPRODUCIENDO"; textSize = 14f; typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER; setPadding(0, 0, 0, 20) }
         homeContent.addView(txtPlayingFrom)
-        imgVinyl = VinylDiskView(this).apply { layoutParams = LinearLayout.LayoutParams(600, 600).apply { setMargins(0, 0, 0, 20) } }
-        homeContent.addView(imgVinyl)
+
+        mediaStageContainer = FrameLayout(this).apply {
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 600).apply {
+                setMargins(0, 0, 0, 20)
+            }
+        }
+
+        imgVinyl = VinylDiskView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(600, 600, Gravity.CENTER)
+            setOnClickListener { toggleVinylTvMode() }
+        }
+
+        tvContainer = FrameLayout(this).apply {
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, 520, Gravity.CENTER)
+            visibility = View.GONE
+            elevation = 12f
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#141414"))
+                cornerRadius = 38f
+                setStroke(4, Color.parseColor("#33FFFFFF"))
+            }
+            clipToOutline = true
+            outlineProvider = ViewOutlineProvider.BACKGROUND
+            setOnClickListener { toggleVinylTvMode() }
+        }
+
+        tvTextureView = TextureView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+            surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
+                    videoSurface?.release()
+                    videoSurface = Surface(surface)
+                    try {
+                        videoMediaPlayer?.setSurface(videoSurface)
+                    } catch (_: Exception) {}
+                    if (isTvMode && !isVideoPrepared) {
+                        loadVideoForCurrentTrack()
+                    }
+                }
+
+                override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
+                    adjustVideoAspectRatio(width, height)
+                }
+
+                override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+                    liveThemeAnimator?.cancel()
+                    liveVideoThemeController?.stopAndRestore(currentTheme.accent, currentTheme.w2c1)
+                    try { videoMediaPlayer?.setSurface(null) } catch (_: Exception) {}
+                    videoSurface?.release()
+                    videoSurface = null
+                    return true
+                }
+
+                override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {}
+            }
+        }
+
+        tvStaticView = TvStaticView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+            visibility = View.GONE
+        }
+
+        tvOverlayLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(40, 40, 40, 40)
+            setBackgroundColor(Color.parseColor("#80000000"))
+            visibility = View.GONE
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+        }
+
+        txtTvStatus = TextView(this).apply {
+            text = "SIN SEÑAL"
+            textSize = 15f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE)
+            setShadowLayer(6f, 0f, 0f, Color.BLACK)
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, 20)
+        }
+
+        btnDownloadClip = Button(this).apply {
+            text = "Descargar videoclip"
+            isAllCaps = false
+            textSize = 13f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE)
+            setPadding(36, 18, 36, 18)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#CC1E1E1E"))
+                cornerRadius = 40f
+                setStroke(2, Color.parseColor("#66FFFFFF"))
+            }
+            setOnClickListener { triggerClipDownloadFromTv() }
+        }
+
+        tvOverlayLayout.addView(txtTvStatus)
+        tvOverlayLayout.addView(btnDownloadClip)
+
+        txtTvBadge = TextView(this).apply {
+            text = "TV • TOCA PARA VINILO"
+            textSize = 10f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE)
+            setPadding(22, 10, 22, 10)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#88000000"))
+                cornerRadius = 24f
+            }
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP or Gravity.END
+            ).apply { setMargins(0, 18, 18, 0) }
+        }
+
+        tvContainer.addView(tvTextureView)
+        tvContainer.addView(tvStaticView)
+        tvContainer.addView(tvOverlayLayout)
+        tvContainer.addView(txtTvBadge)
+
+        mediaStageContainer.addView(imgVinyl)
+        mediaStageContainer.addView(tvContainer)
+        homeContent.addView(mediaStageContainer)
+
         txtTitle = TextView(this).apply { text = "Selecciona una pista"; textSize = 20f; typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.START; layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT) }
         txtArtist = TextView(this).apply { text = "Lista de Reproduccion"; textSize = 14f; gravity = Gravity.START; setPadding(0, 5, 0, 20); layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT) }
         wavySeekBar = WavySeekBar(this).apply { layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 50).apply { setMargins(0, 5, 0, 5) } }
-        wavySeekBar.onProgressChanged = { prog, fromUser -> if (fromUser) { try { mediaPlayer?.let { it.seekTo((prog * it.duration).toInt()); actualizarNotificacion() } } catch (e: Exception) {} } }
+        wavySeekBar.onProgressChanged = { prog, fromUser ->
+            if (fromUser) {
+                try {
+                    mediaPlayer?.let {
+                        val targetMs = (prog * it.duration).toInt()
+                        it.seekTo(targetMs)
+                        if (isVideoPrepared) {
+                            videoMediaPlayer?.let { vp ->
+                                if (vp.duration > 0) vp.seekTo(targetMs.coerceAtMost(vp.duration))
+                            }
+                        }
+                        actualizarNotificacion()
+                    }
+                } catch (e: Exception) {}
+            }
+        }
         val timeLayout = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT); setPadding(0, 0, 0, 10) }
         txtCurrentTime = TextView(this).apply { text = "00:00"; textSize = 11f }; txtTotalTime = TextView(this).apply { text = "00:00"; textSize = 11f; gravity = Gravity.END; layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
         timeLayout.addView(txtCurrentTime); timeLayout.addView(txtTotalTime)
@@ -767,7 +1050,7 @@ class MainActivity : AppCompatActivity() {
         btnLoop = Button(this).apply { text = "REPETIR"; textSize = 11f; setBackgroundColor(Color.TRANSPARENT); setPadding(0,0,0,0) }
         dotLoop = View(this).apply { layoutParams = LinearLayout.LayoutParams(15, 15).apply { setMargins(5,0,0,0) }; background = GradientDrawable().apply { cornerRadius=15f; setColor(Color.TRANSPARENT) } }
         wrapLoop.addView(btnLoop); wrapLoop.addView(dotLoop)
-        btnLoop.setOnClickListener { isLooping = !isLooping; mediaPlayer?.isLooping = isLooping; (dotLoop.background as GradientDrawable).setColor(if (isLooping) currentTheme.accent else Color.TRANSPARENT); dotLoop.invalidate() }
+        btnLoop.setOnClickListener { isLooping = !isLooping; mediaPlayer?.isLooping = isLooping; videoMediaPlayer?.isLooping = isLooping; (dotLoop.background as GradientDrawable).setColor(if (isLooping) currentTheme.accent else Color.TRANSPARENT); dotLoop.invalidate() }
 
         controlsRow2.addView(btnShuffle); controlsRow2.addView(btnFavRadial); controlsRow2.addView(wrapLoop)
         
@@ -775,7 +1058,7 @@ class MainActivity : AppCompatActivity() {
         
         val divider = View(this).apply { layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 2).apply { setMargins(0, 80, 0, 40) }; setBackgroundColor(Color.parseColor("#33888888")) }
         btnAddToPlaylist = Button(this).apply { 
-            text = "➕ Agregar canción a Playlist"
+            text = "Agregar canción a Playlist"
             isAllCaps = false
             setOnClickListener { 
                 if (playlistActual.isNotEmpty() && currentIndex >= 0 && currentIndex < playlistActual.size) {
@@ -790,7 +1073,7 @@ class MainActivity : AppCompatActivity() {
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 20, 0, 20) }
         }
         txtFypHeader = TextView(this).apply { 
-            text = "🔥 Canciones recomendadas"
+            text = "Canciones recomendadas"
             textSize = 18f
             typeface = Typeface.DEFAULT_BOLD
             setPadding(0, 20, 0, 15)
@@ -881,7 +1164,7 @@ class MainActivity : AppCompatActivity() {
         }
         btnDoSearch = Button(this).apply { text = "BUSCAR"; setBackgroundColor(Color.TRANSPARENT) }
         btnDownloadPlaylist = Button(this).apply {
-            text = "📥 Descargar Playlist por Enlace"
+            text = "Descargar Playlist por Enlace"
             isAllCaps = false
             textSize = 13f
             setPadding(30, 20, 30, 20)
@@ -908,88 +1191,85 @@ class MainActivity : AppCompatActivity() {
         }
         searchScroll.addView(resultContainer)
         sectionSearch.addView(searchScroll)
-        
-        
 
         btnDoSearch.setOnClickListener {
             val q = inputYtSearch.text.toString().trim()
             if (q.isEmpty()) return@setOnClickListener
 
-            // Detección automática de enlaces de Playlist
             if (q.contains("list=", ignoreCase = true) || q.contains("playlist", ignoreCase = true)) {
                 mostrarDialogoDescargaPlaylist(q)
                 return@setOnClickListener
             }
 
             btnDoSearch.text = "BUSCANDO..."
-        lifecycleScope.launch {
-            val results = YtDlpRepository(this@MainActivity).searchYoutube(q, 5)
-            resultContainer.removeAllViews()
-            if (results.isNotEmpty()) {
-                for (data in results) {
-                    val row = LinearLayout(this@MainActivity).apply { 
-                        orientation = LinearLayout.HORIZONTAL
-                        gravity = Gravity.CENTER_VERTICAL
-                        setPadding(25, 25, 25, 25)
-                        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 8, 0, 8) }
-                        background = getGlassDrawable(currentTheme.isDark) 
-                    }
-                    val img = ImageView(this@MainActivity).apply { 
-                        layoutParams = LinearLayout.LayoutParams(130, 130).apply { setMargins(0, 0, 30, 0) }
-                        scaleType = ImageView.ScaleType.CENTER_CROP
-                        clipToOutline = true
-                        outlineProvider = object : ViewOutlineProvider() { 
-                            override fun getOutline(view: View, outline: Outline) { outline.setRoundRect(0, 0, view.width, view.height, 20f) } 
+            lifecycleScope.launch {
+                val results = YtDlpRepository(this@MainActivity).searchYoutube(q, 5)
+                resultContainer.removeAllViews()
+                if (results.isNotEmpty()) {
+                    for (data in results) {
+                        val row = LinearLayout(this@MainActivity).apply { 
+                            orientation = LinearLayout.HORIZONTAL
+                            gravity = Gravity.CENTER_VERTICAL
+                            setPadding(25, 25, 25, 25)
+                            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 8, 0, 8) }
+                            background = getGlassDrawable(currentTheme.isDark) 
                         }
-                        setBackgroundColor(Color.parseColor(if(currentTheme.isDark) "#2A2A2A" else "#E0E0E0")) 
-                    }
-                    val thumbUrl = data["thumbnail"] ?: ""
-                    loadExternalImageAsync(thumbUrl, img)
-                    
-                    val titleText = data["title"] ?: ""
-                    val txt = TextView(this@MainActivity).apply { 
-                        text = titleText
-                        textSize = 15f
-                        applyContrastingText(currentTheme.isDark)
-                        layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0,0,15,0) }
-                        maxLines = 2
-                        ellipsize = android.text.TextUtils.TruncateAt.END 
-                    }
-                    val btnDl = ImageButton(this@MainActivity).apply { 
-                        setImageResource(android.R.drawable.stat_sys_download)
-                        background = null
-                        setPadding(20,0,20,0)
-                        setColorFilter(if (currentTheme.isDark) Color.WHITE else Color.BLACK) 
-                    }
-                    
-                    btnDl.setOnClickListener {
-                        val ytId = data["id"] ?: ""
-                        val ytUrl = "https://www.youtube.com/watch?v=$ytId"
-                        android.widget.Toast.makeText(this@MainActivity, "Iniciando descarga...", android.widget.Toast.LENGTH_SHORT).show()
-                        val destFolder = java.io.File(getExternalFilesDir(null), "Base-Musica/Recien agregados")
-                        if (!destFolder.exists()) { destFolder.mkdirs() }
-                        viewModel.loadLocalMusic()
-                        viewModel.downloadSingleTrack(ytUrl, "Recien agregados") { success ->
-                            if (success) {
-                                android.widget.Toast.makeText(this@MainActivity, "¡Descarga completa!", android.widget.Toast.LENGTH_SHORT).show()
-                            } else {
-                                android.widget.Toast.makeText(this@MainActivity, "Error en descarga", android.widget.Toast.LENGTH_SHORT).show()
+                        val img = ImageView(this@MainActivity).apply { 
+                            layoutParams = LinearLayout.LayoutParams(130, 130).apply { setMargins(0, 0, 30, 0) }
+                            scaleType = ImageView.ScaleType.CENTER_CROP
+                            clipToOutline = true
+                            outlineProvider = object : ViewOutlineProvider() { 
+                                override fun getOutline(view: View, outline: Outline) { outline.setRoundRect(0, 0, view.width, view.height, 20f) } 
+                            }
+                            setBackgroundColor(Color.parseColor(if(currentTheme.isDark) "#2A2A2A" else "#E0E0E0")) 
+                        }
+                        val thumbUrl = data["thumbnail"] ?: ""
+                        loadExternalImageAsync(thumbUrl, img)
+                        
+                        val titleText = data["title"] ?: ""
+                        val txt = TextView(this@MainActivity).apply { 
+                            text = titleText
+                            textSize = 15f
+                            applyContrastingText(currentTheme.isDark)
+                            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply { setMargins(0,0,15,0) }
+                            maxLines = 2
+                            ellipsize = android.text.TextUtils.TruncateAt.END 
+                        }
+                        val btnDl = ImageButton(this@MainActivity).apply { 
+                            setImageResource(android.R.drawable.stat_sys_download)
+                            background = null
+                            setPadding(20,0,20,0)
+                            setColorFilter(if (currentTheme.isDark) Color.WHITE else Color.BLACK) 
+                        }
+                        
+                        btnDl.setOnClickListener {
+                            val ytId = data["id"] ?: ""
+                            val ytUrl = "https://www.youtube.com/watch?v=$ytId"
+                            android.widget.Toast.makeText(this@MainActivity, "Iniciando descarga...", android.widget.Toast.LENGTH_SHORT).show()
+                            val destFolder = java.io.File(getExternalFilesDir(null), "Base-Musica/Recien agregados")
+                            if (!destFolder.exists()) { destFolder.mkdirs() }
+                            viewModel.loadLocalMusic()
+                            viewModel.downloadSingleTrack(ytUrl, "Recien agregados") { success ->
+                                if (success) {
+                                    autoDownloadMatchingVideo(ytUrl, destFolder)
+                                    android.widget.Toast.makeText(this@MainActivity, "¡Descarga completa!", android.widget.Toast.LENGTH_SHORT).show()
+                                } else {
+                                    android.widget.Toast.makeText(this@MainActivity, "Error en descarga", android.widget.Toast.LENGTH_SHORT).show()
+                                }
                             }
                         }
+                        row.addView(img)
+                        row.addView(txt)
+                        row.addView(btnDl)
+                        resultContainer.addView(row)
                     }
-                    row.addView(img)
-                    row.addView(txt)
-                    row.addView(btnDl)
-                    resultContainer.addView(row)
+                    resultContainer.visibility = View.VISIBLE
+                } else {
+                    android.widget.Toast.makeText(this@MainActivity, "No se encontró nada", android.widget.Toast.LENGTH_SHORT).show()
                 }
-                resultContainer.visibility = View.VISIBLE
-            } else {
-                android.widget.Toast.makeText(this@MainActivity, "No se encontró nada", android.widget.Toast.LENGTH_SHORT).show()
+                btnDoSearch.text = "BUSCAR"
             }
-            btnDoSearch.text = "BUSCAR"
         }
-    }
-        
 
         // --- AJUSTES ---
         sectionSettings = LinearLayout(this).apply { layoutParams = lpPage; orientation = LinearLayout.VERTICAL; setPadding(40, 140, 40, 20) }
@@ -1007,14 +1287,33 @@ class MainActivity : AppCompatActivity() {
             setOnCheckedChangeListener { _, isChecked ->
                 isDynamicThemeEnabled = isChecked
                 if (!isChecked) {
+                    liveThemeAnimator?.cancel()
+                    liveVideoThemeController?.stopAndRestore(currentTheme.accent, currentTheme.w2c1)
                     val savedName = prefs.getString("APP_THEME", "Blanco con rojo") ?: "Blanco con rojo"
                     animateThemeTransition(THEMES[savedName] ?: THEMES["Blanco con rojo"]!!)
                 } else {
-                    imgVinyl.bitmap?.let { extraerTemaDinamicoDeCaratula(it) }
+                    if (isTvMode && isVideoPrepared && tvTextureView.isAvailable) {
+                        liveVideoThemeController?.setInitialColors(currentTheme.accent, currentTheme.w2c1)
+                        liveVideoThemeController?.startSampling(tvTextureView)
+                    } else {
+                        imgVinyl.bitmap?.let { extraerTemaDinamicoDeCaratula(it) }
+                    }
                 }
             }
         }
-        sectionSettings.addView(txtSettingsHeader); sectionSettings.addView(btnCambiarTema); sectionSettings.addView(txtHeaderPlayback); sectionSettings.addView(switchCrossfade); sectionSettings.addView(switchDynamicTheme); sectionSettings.addView(btnSleepTimer)
+
+        switchAutoVideo = Switch(this).apply {
+            text = "Descargar videoclip automáticamente"
+            textSize = 16f
+            isChecked = isAutoDownloadVideoEnabled
+            setPadding(40, 40, 40, 40)
+            setOnCheckedChangeListener { _, isChecked ->
+                isAutoDownloadVideoEnabled = isChecked
+                prefs.edit().putBoolean("AUTO_DOWNLOAD_VIDEO", isChecked).apply()
+            }
+        }
+
+        sectionSettings.addView(txtSettingsHeader); sectionSettings.addView(btnCambiarTema); sectionSettings.addView(txtHeaderPlayback); sectionSettings.addView(switchCrossfade); sectionSettings.addView(switchDynamicTheme); sectionSettings.addView(switchAutoVideo); sectionSettings.addView(btnSleepTimer)
         
         pagesContainer.addView(sectionHome); pagesContainer.addView(sectionPlaylist); pagesContainer.addView(sectionQueue); pagesContainer.addView(sectionSearch); pagesContainer.addView(sectionSettings)
         tabScrollView.addView(pagesContainer); contentFrame.addView(tabScrollView)
@@ -1032,6 +1331,312 @@ class MainActivity : AppCompatActivity() {
         bottomNavGlass.addView(btnSearchNav, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f))
         bottomNavGlass.addView(btnSettingsNav, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f))
         contentFrame.addView(bottomNavGlass); mainLayout.addView(contentFrame)
+    }
+
+    private fun autoDownloadMatchingVideo(ytUrl: String, destFolder: File) {
+        if (!isAutoDownloadVideoEnabled || ytUrl.isEmpty()) return
+
+        val latestAudio = destFolder.listFiles { file ->
+            file.isFile && (file.extension.equals("m4a", true) ||
+                            file.extension.equals("mp3", true) ||
+                            file.extension.equals("webm", true))
+        }?.maxByOrNull { it.lastModified() } ?: return
+
+        val exactBaseName = latestAudio.nameWithoutExtension
+        val videosDir = File(getExternalFilesDir(null), "Base-Videos").apply { mkdirs() }
+        val outputFile = File(videosDir, "$exactBaseName.mp4")
+
+        if (outputFile.exists() && outputFile.length() > 0L) return
+        if (!activeVideoDownloads.add(exactBaseName)) return
+
+        if (isTvMode) {
+            handler.post { loadVideoForCurrentTrack() }
+        }
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val req = YoutubeDLRequest(ytUrl).apply {
+                    addOption("--extractor-args", "youtube:player_client=android,web")
+                    addOption("--no-playlist")
+                    addOption("-f", "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[ext=mp4]")
+                    addOption("--merge-output-format", "mp4")
+                    addOption("--concurrent-fragments", "4")
+                    addOption("-o", outputFile.absolutePath)
+                }
+                YoutubeDL.getInstance().execute(req, null, null)
+            } catch (_: Exception) {
+                if (outputFile.exists() && outputFile.length() == 0L) outputFile.delete()
+            } finally {
+                activeVideoDownloads.remove(exactBaseName)
+                withContext(Dispatchers.Main) {
+                    val currentPlayingBase = playlistActual.getOrNull(currentIndex)
+                        ?.takeIf { !it.startsWith("LIVE_STREAM|") }
+                        ?.let { File(it).nameWithoutExtension }
+
+                    if (isTvMode && currentPlayingBase == exactBaseName && outputFile.exists()) {
+                        loadVideoForCurrentTrack()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun toggleVinylTvMode() {
+        isTvMode = !isTvMode
+        if (isTvMode) {
+            imgVinyl.animate().alpha(0f).scaleX(0.92f).scaleY(0.92f).setDuration(180).withEndAction {
+                imgVinyl.visibility = View.GONE
+                imgVinyl.alpha = 1f
+                imgVinyl.scaleX = 1f
+                imgVinyl.scaleY = 1f
+            }.start()
+
+            tvContainer.alpha = 0f
+            tvContainer.visibility = View.VISIBLE
+            tvContainer.animate().alpha(1f).setDuration(220).start()
+            loadVideoForCurrentTrack()
+        } else {
+            releaseVideoPlayer()
+            tvContainer.animate().alpha(0f).setDuration(180).withEndAction {
+                tvContainer.visibility = View.GONE
+                tvContainer.alpha = 1f
+            }.start()
+
+            imgVinyl.alpha = 0f
+            imgVinyl.visibility = View.VISIBLE
+            imgVinyl.animate().alpha(1f).setDuration(220).start()
+
+            if (isDynamicThemeEnabled) {
+                imgVinyl.bitmap?.let { extraerTemaDinamicoDeCaratula(it) }
+            }
+        }
+    }
+
+    private fun findLocalVideoForTrack(songPath: String): File? {
+        val videoExts = setOf("mp4", "mkv", "mov", "3gp")
+        val videosDir = File(getExternalFilesDir(null), "Base-Videos")
+
+        if (songPath.startsWith("LIVE_STREAM|")) {
+            val rawTitle = songPath.split("|").getOrNull(2).orEmpty()
+            val safeName = rawTitle.replace(Regex("[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ _-]"), "").trim()
+            if (safeName.isNotEmpty() && videosDir.exists()) {
+                videosDir.listFiles()?.firstOrNull {
+                    it.isFile && it.nameWithoutExtension.equals(safeName, ignoreCase = true) && it.extension.lowercase() in videoExts
+                }?.let { return it }
+            }
+            return null
+        }
+
+        val audioFile = File(songPath)
+        val baseName = audioFile.nameWithoutExtension
+        val parentDir = audioFile.parentFile
+
+        parentDir?.listFiles()?.firstOrNull {
+            it.isFile &&
+                it.absolutePath != audioFile.absolutePath &&
+                it.nameWithoutExtension.equals(baseName, ignoreCase = true) &&
+                (it.extension.lowercase() in videoExts || it.extension.equals("webm", ignoreCase = true))
+        }?.let { return it }
+
+        if (videosDir.exists()) {
+            videosDir.listFiles()?.firstOrNull {
+                it.isFile &&
+                    it.nameWithoutExtension.equals(baseName, ignoreCase = true) &&
+                    (it.extension.lowercase() in videoExts || it.extension.equals("webm", ignoreCase = true))
+            }?.let { return it }
+        }
+
+        return null
+    }
+
+    private fun loadVideoForCurrentTrack() {
+        releaseVideoPlayer()
+        if (!isTvMode) return
+
+        tvStaticView.showStatic()
+        if (playlistActual.isEmpty() || currentIndex !in playlistActual.indices) {
+            tvOverlayLayout.visibility = View.VISIBLE
+            txtTvStatus.text = "REPRODUCE UNA PISTA"
+            btnDownloadClip.visibility = View.GONE
+            return
+        }
+
+        val currentPath = playlistActual[currentIndex]
+        val videoFile = findLocalVideoForTrack(currentPath)
+        val currentBaseName = if (currentPath.startsWith("LIVE_STREAM|")) "" else File(currentPath).nameWithoutExtension
+        val isDownloadingThis = isDownloadingClip || (currentBaseName.isNotEmpty() && activeVideoDownloads.contains(currentBaseName))
+
+        if (videoFile == null) {
+            tvOverlayLayout.visibility = View.VISIBLE
+            txtTvStatus.text = if (isDownloadingThis) "DESCARGANDO VIDEOCLIP..." else "SIN SEÑAL DE VIDEO"
+            btnDownloadClip.visibility = if (isDownloadingThis) View.GONE else View.VISIBLE
+            return
+        }
+
+        tvOverlayLayout.visibility = View.GONE
+        if (!tvTextureView.isAvailable) return
+
+        try {
+            if (videoSurface == null && tvTextureView.surfaceTexture != null) {
+                videoSurface = Surface(tvTextureView.surfaceTexture)
+            }
+            videoMediaPlayer = MediaPlayer().apply {
+                setSurface(videoSurface)
+                setVolume(0f, 0f)
+                isLooping = this@MainActivity.isLooping
+                setDataSource(videoFile.absolutePath)
+                setOnVideoSizeChangedListener { _, _, _ ->
+                    adjustVideoAspectRatio(tvTextureView.width, tvTextureView.height)
+                }
+                setOnPreparedListener { vp ->
+                    isVideoPrepared = true
+                    adjustVideoAspectRatio(tvTextureView.width, tvTextureView.height)
+                    val audioPos = try { mediaPlayer?.currentPosition ?: 0 } catch (_: Exception) { 0 }
+                    if (audioPos > 0 && vp.duration > 0) {
+                        vp.seekTo(audioPos.coerceAtMost((vp.duration - 200).coerceAtLeast(0)))
+                    }
+                    if (mediaPlayer?.isPlaying == true) {
+                        vp.start()
+                    }
+                    tvStaticView.fadeOutStatic(380L)
+                    if (isDynamicThemeEnabled) {
+                        liveVideoThemeController?.setInitialColors(currentTheme.accent, currentTheme.w2c1)
+                        liveVideoThemeController?.startSampling(tvTextureView)
+                    }
+                }
+                setOnErrorListener { _, _, _ ->
+                    isVideoPrepared = false
+                    tvStaticView.showStatic()
+                    tvOverlayLayout.visibility = View.VISIBLE
+                    txtTvStatus.text = "ERROR AL REPRODUCIR CLIP"
+                    btnDownloadClip.visibility = View.VISIBLE
+                    true
+                }
+                prepareAsync()
+            }
+        } catch (_: Exception) {
+            tvStaticView.showStatic()
+            tvOverlayLayout.visibility = View.VISIBLE
+        }
+    }
+
+    private fun adjustVideoAspectRatio(viewWidth: Int, viewHeight: Int) {
+        val vp = videoMediaPlayer ?: return
+        if (viewWidth <= 0 || viewHeight <= 0) return
+        val videoWidth = try { vp.videoWidth } catch (_: Exception) { 0 }
+        val videoHeight = try { vp.videoHeight } catch (_: Exception) { 0 }
+        if (videoWidth <= 0 || videoHeight <= 0) return
+
+        val viewRatio = viewWidth.toFloat() / viewHeight.toFloat()
+        val videoRatio = videoWidth.toFloat() / videoHeight.toFloat()
+
+        var scaleX = 1f
+        var scaleY = 1f
+        if (videoRatio > viewRatio) {
+            scaleX = videoRatio / viewRatio
+        } else {
+            scaleY = viewRatio / videoRatio
+        }
+
+        val matrix = Matrix().apply {
+            setScale(scaleX, scaleY, viewWidth / 2f, viewHeight / 2f)
+        }
+        tvTextureView.setTransform(matrix)
+    }
+
+    private fun triggerClipDownloadFromTv() {
+        if (isDownloadingClip || playlistActual.isEmpty() || currentIndex !in playlistActual.indices) return
+        val currentPath = playlistActual[currentIndex]
+        val title = txtTitle.text.toString()
+
+        isDownloadingClip = true
+        btnDownloadClip.visibility = View.GONE
+        txtTvStatus.text = "BUSCANDO Y DESCARGANDO (0%)..."
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                val videosDir = File(getExternalFilesDir(null), "Base-Videos").apply { mkdirs() }
+                val baseName = if (currentPath.startsWith("LIVE_STREAM|")) {
+                    title.replace(Regex("[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ _-]"), "").trim().ifEmpty { "clip_stream" }
+                } else {
+                    File(currentPath).nameWithoutExtension
+                }
+                val outputFile = File(videosDir, "$baseName.mp4")
+
+                val targetUrl = if (currentPath.startsWith("LIVE_STREAM|")) {
+                    currentPath.split("|").getOrNull(4).orEmpty()
+                } else {
+                    val cleanQuery = title
+                        .replace(Regex("\\s*[-–_]\\s*(Topic|VEVO|Official|Oficial|Music|Records|Entertainment|Channel|TV|HD|4K|Audio|Video|Lyrics)(\\s|$)", RegexOption.IGNORE_CASE), "")
+                        .replace(Regex("\\(.*?\\)", RegexOption.DOT_MATCHES_ALL), "")
+                        .replace(Regex("\\[.*?\\]", RegexOption.DOT_MATCHES_ALL), "")
+                        .replace("_", " ")
+                        .replace(Regex("\\s{2,}"), " ")
+                        .trim()
+                    val found = YtDlpRepository(this@MainActivity).searchYoutube("$cleanQuery official video", 1)
+                    val vid = found.firstOrNull()?.get("id").orEmpty()
+                    if (vid.isNotEmpty()) "https://www.youtube.com/watch?v=$vid" else ""
+                }
+
+                if (targetUrl.isEmpty()) {
+                    withContext(Dispatchers.Main) {
+                        isDownloadingClip = false
+                        txtTvStatus.text = "NO SE ENCONTRÓ VIDEOCLIP"
+                        btnDownloadClip.visibility = View.VISIBLE
+                    }
+                    return@launch
+                }
+
+                val req = YoutubeDLRequest(targetUrl).apply {
+                    addOption("--extractor-args", "youtube:player_client=android,web")
+                    addOption("--no-playlist")
+                    addOption("-f", "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[ext=mp4]")
+                    addOption("--merge-output-format", "mp4")
+                    addOption("--concurrent-fragments", "4")
+                    addOption("-o", outputFile.absolutePath)
+                }
+
+                YoutubeDL.getInstance().execute(req, null) { progress, _, _ ->
+                    if (progress >= 0f) {
+                        val pct = progress.toInt().coerceIn(0, 100)
+                        handler.post {
+                            txtTvStatus.text = "DESCARGANDO VIDEOCLIP ($pct%)..."
+                        }
+                    }
+                }
+
+                val success = outputFile.exists() && outputFile.length() > 0L
+                withContext(Dispatchers.Main) {
+                    isDownloadingClip = false
+                    if (success) {
+                        Toast.makeText(this@MainActivity, "Videoclip listo", Toast.LENGTH_SHORT).show()
+                        if (isTvMode) loadVideoForCurrentTrack()
+                    } else {
+                        txtTvStatus.text = "NO SE PUDO DESCARGAR"
+                        btnDownloadClip.visibility = View.VISIBLE
+                    }
+                }
+            } catch (_: Exception) {
+                withContext(Dispatchers.Main) {
+                    isDownloadingClip = false
+                    txtTvStatus.text = "ERROR AL DESCARGAR CLIP"
+                    btnDownloadClip.visibility = View.VISIBLE
+                }
+            }
+        }
+    }
+
+    private fun releaseVideoPlayer() {
+        liveThemeAnimator?.cancel()
+        liveVideoThemeController?.stopAndRestore(currentTheme.accent, currentTheme.w2c1)
+        isVideoPrepared = false
+        try {
+            videoMediaPlayer?.stop()
+        } catch (_: Exception) {}
+        try {
+            videoMediaPlayer?.release()
+        } catch (_: Exception) {}
+        videoMediaPlayer = null
     }
 
     private fun mostrarDialogoSleepTimer() {
@@ -1060,18 +1665,12 @@ class MainActivity : AppCompatActivity() {
             
             if (isNowLiked) {
                 Toast.makeText(this, "Descargando a 'Mi favs' localmente...", Toast.LENGTH_SHORT).show()
-                lifecycleScope.launch(Dispatchers.IO) {
-                    try {
-                        val destFolder = File(getExternalFilesDir(null), "Base-Musica/Mi favs").apply { mkdirs() }
-                        val req = YoutubeDLRequest(ytUrl)
-                        req.addOption("-x")
-                        req.addOption("--audio-format", "mp3")
-                    req.addOption("--embed-thumbnail")
-                    req.addOption("--embed-metadata")
-                        req.addOption("-o", File(destFolder, "%(title)s.%(ext)s").absolutePath)
-                        YoutubeDL.getInstance().execute(req, null, null)
-                        withContext(Dispatchers.Main) { viewModel.loadLocalMusic() }
-                    } catch (e: Exception) { }
+                val destFolder = File(getExternalFilesDir(null), "Base-Musica/Mi favs").apply { mkdirs() }
+                viewModel.downloadSingleTrack(ytUrl, "Mi favs") { success ->
+                    if (success) {
+                        autoDownloadMatchingVideo(ytUrl, destFolder)
+                        viewModel.loadLocalMusic()
+                    }
                 }
             } else {
                 Toast.makeText(this, "Para quitar el Like, bórrala desde la carpeta 'Mi favs'", Toast.LENGTH_LONG).show()
@@ -1080,7 +1679,6 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        // Like para archivos físicos locales
         val isNowLiked = viewModel.toggleLike(rutaArchivo)
         btnFavRadial.setLikedState(isNowLiked)
     }
@@ -1102,7 +1700,7 @@ class MainActivity : AppCompatActivity() {
         mapPlaylists.keys.forEach { folderName ->
             val folderWrapper = FrameLayout(this).apply { layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 10, 0, 10) }; background = getGlassDrawable(currentTheme.isDark); outlineProvider = ViewOutlineProvider.BACKGROUND; clipToOutline = true; tag = folderName }
             val waveView = WaveFillView(this).apply { themeColor = currentTheme.accent; layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT) }
-            val folderRow = LinearLayout(this).apply { layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT); orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(40, 40, 40, 40); setOnClickListener { abrirCarpetaPlaylist(folderName) } }
+            val folderRow = LinearLayout(this).apply { layoutParams = LinearLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT); orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(40, 40, 40, 40); setOnClickListener { abrirCarpetaPlaylist(folderName) } }
             val txtFolder = TextView(this).apply { text = folderName; textSize = 16f; typeface = Typeface.DEFAULT_BOLD; applyContrastingText(currentTheme.isDark); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
             val btnEdit = ImageButton(this).apply { setImageResource(android.R.drawable.ic_menu_edit); background = null; setColorFilter(if (currentTheme.isDark) Color.WHITE else Color.BLACK); setPadding(10,10,10,10); setOnClickListener { mostrarDialogoEditar(folderName) } }
             folderRow.addView(txtFolder)
@@ -1157,13 +1755,13 @@ class MainActivity : AppCompatActivity() {
                         try { if (progressDialog.isShowing) progressDialog.dismiss() } catch (e: Exception) {}
                         if (count > 0) {
                             androidx.appcompat.app.AlertDialog.Builder(this)
-                                .setTitle("✅ Playlist Registrada")
+                                .setTitle("Playlist Registrada")
                                 .setMessage("Se añadieron $count canciones a la cola de SQLite.\n\nLa descarga se procesará una a una en segundo plano con notificación activa. Si se corta internet o se cierra la app, se reanudará automáticamente.")
                                 .setPositiveButton("Entendido", null)
                                 .show()
                             viewModel.loadLocalMusic()
                         } else {
-                            Toast.makeText(this, "❌ $folderName", Toast.LENGTH_LONG).show()
+                            Toast.makeText(this, "$folderName", Toast.LENGTH_LONG).show()
                         }
                     }
                 )
@@ -1202,7 +1800,6 @@ class MainActivity : AppCompatActivity() {
                     if(old.exists()) { 
                         old.renameTo(new)
                         viewModel.loadLocalMusic()
-                        // Seguridad al renombrar la playlist actual
                         if (nombrePlaylistActual == folderName) {
                             nombrePlaylistActual = nuevo
                             txtArtist.text = "Playlist: $nombrePlaylistActual"
@@ -1213,11 +1810,16 @@ class MainActivity : AppCompatActivity() {
             .setNegativeButton("Borrar") { _, _ -> 
                 val f = File(getExternalFilesDir(null), "Base-Musica/$folderName")
                 if(f.exists()){ 
+                    f.listFiles()?.forEach { audioFile ->
+                        if (audioFile.isFile) {
+                            File(getExternalFilesDir(null), "Base-Videos/${audioFile.nameWithoutExtension}.mp4").delete()
+                        }
+                    }
                     f.deleteRecursively()
                     viewModel.loadLocalMusic() 
                     
-                    // Lógica de seguridad anti-crash
                     if (nombrePlaylistActual == folderName) {
+                        releaseVideoPlayer()
                         try {
                             mediaPlayer?.pause()
                             mediaPlayer?.release()
@@ -1237,11 +1839,10 @@ class MainActivity : AppCompatActivity() {
                         imgVinyl.isSpinning = false
                         imgVinyl.bitmap = null
                         btnPlayPause.setImageResource(android.R.drawable.ic_media_play)
+                        if (isTvMode) loadVideoForCurrentTrack()
                         
                         if (::queueAdapter.isInitialized) queueAdapter.updateList(playlistActual)
                         notificationManager.cancel(1)
-                        
-                        
                     }
                 } 
             }
@@ -1272,15 +1873,19 @@ class MainActivity : AppCompatActivity() {
             var wasPlayingDeleted = false
             
             for (song in selectedSongs) { 
-                java.io.File(song).delete() 
+                val audioFile = java.io.File(song)
+                java.io.File(getExternalFilesDir(null), "Base-Videos/${audioFile.nameWithoutExtension}.mp4").delete()
+                audioFile.delete() 
                 if (song == currentPath) wasPlayingDeleted = true
                 playlistActual.remove(song)
             }
             
             if (wasPlayingDeleted) {
                 if (playlistActual.isEmpty()) {
+                    releaseVideoPlayer()
                     try { mediaPlayer?.pause() } catch(e:Exception){}
                     currentIndex = 0; txtTitle.text = "Selecciona una pista"; txtArtist.text = "Lista de Reproducción"
+                    if (isTvMode) loadVideoForCurrentTrack()
                 } else {
                     currentIndex = currentIndex.coerceAtMost(playlistActual.size - 1)
                     reproducirCancionActual()
@@ -1311,6 +1916,7 @@ class MainActivity : AppCompatActivity() {
     private fun resetLoopState() {
         isLooping = false
         mediaPlayer?.isLooping = false
+        videoMediaPlayer?.isLooping = false
         (dotLoop.background as GradientDrawable).setColor(Color.TRANSPARENT)
         dotLoop.invalidate()
     }
@@ -1395,7 +2001,6 @@ class MainActivity : AppCompatActivity() {
                     animateThemeTransition(dynamicTheme)
                 }
             } catch (e: Exception) {
-                // Si falla la extracción, no hacer nada (mantener tema actual)
             }
         }
     }
@@ -1409,7 +2014,7 @@ class MainActivity : AppCompatActivity() {
                     try {
                         val conn = URL(urlImg).openConnection() as HttpURLConnection
                         conn.connectTimeout = 5000; conn.doInput = true; conn.connect()
-                        if (conn.responseCode == 200) { val bmp = BitmapFactory.decodeStream(conn.inputStream); withContext(Dispatchers.Main) { imgVinyl.bitmap = bmp; actualizarNotificacion() }; if (bmp != null) extraerTemaDinamicoDeCaratula(bmp) }
+                        if (conn.responseCode == 200) { val bmp = BitmapFactory.decodeStream(conn.inputStream); withContext(Dispatchers.Main) { imgVinyl.bitmap = bmp; actualizarNotificacion() }; if (bmp != null && !isTvMode) extraerTemaDinamicoDeCaratula(bmp) }
                         conn.disconnect()
                     } catch (e: Exception) {}
                 }
@@ -1424,14 +2029,14 @@ class MainActivity : AppCompatActivity() {
                 if (pic != null) {
                     val bmp = BitmapFactory.decodeByteArray(pic, 0, pic.size)
                     withContext(Dispatchers.Main) { imgVinyl.bitmap = bmp; actualizarNotificacion() }
-                    extraerTemaDinamicoDeCaratula(bmp)
+                    if (!isTvMode) extraerTemaDinamicoDeCaratula(bmp)
                 } else {
                     val baseName = File(rutaArchivo).nameWithoutExtension
                     val dir = File(rutaArchivo).parentFile; val cover = dir?.listFiles()?.firstOrNull { it.name.startsWith(baseName) && (it.name.endsWith(".jpg") || it.name.endsWith(".png")) }
                     if (cover != null) {
                         val bmp = BitmapFactory.decodeFile(cover.absolutePath)
                         withContext(Dispatchers.Main) { imgVinyl.bitmap = bmp; actualizarNotificacion() }
-                        if (bmp != null) extraerTemaDinamicoDeCaratula(bmp)
+                        if (bmp != null && !isTvMode) extraerTemaDinamicoDeCaratula(bmp)
                     }
                 }
                 mmr.release()
@@ -1442,6 +2047,12 @@ class MainActivity : AppCompatActivity() {
     private fun reproducirCancionActual() {
         if (playlistActual.isEmpty() || currentIndex >= playlistActual.size || currentIndex < 0) return
         val rutaArchivo = playlistActual[currentIndex]
+
+        if (isTvMode) {
+            loadVideoForCurrentTrack()
+        } else {
+            releaseVideoPlayer()
+        }
         
         if (rutaArchivo.startsWith("LIVE_STREAM|")) {
             val parts = rutaArchivo.split("|")
@@ -1463,7 +2074,13 @@ class MainActivity : AppCompatActivity() {
                     setOnErrorListener { _, _, _ -> true }
                     setDataSource(streamUrl)
                     prepareAsync()
-                    setOnPreparedListener { it.start(); btnPlayPause.setImageResource(android.R.drawable.ic_media_pause); wavySeekBar.isWaving = true; imgVinyl.isSpinning = true; txtTotalTime.text = formatTime(it.duration); actualizarBarraProgreso(); actualizarNotificacion() }
+                    setOnPreparedListener {
+                        it.start()
+                        if (isTvMode && isVideoPrepared) {
+                            try { videoMediaPlayer?.let { vp -> if (!vp.isPlaying) vp.start() } } catch (_: Exception) {}
+                        }
+                        btnPlayPause.setImageResource(android.R.drawable.ic_media_pause); wavySeekBar.isWaving = true; imgVinyl.isSpinning = true; txtTotalTime.text = formatTime(it.duration); actualizarBarraProgreso(); actualizarNotificacion()
+                    }
                     setOnCompletionListener { reproducirSiguiente() }
                 }
             } catch (e: Exception) {}
@@ -1482,7 +2099,13 @@ class MainActivity : AppCompatActivity() {
                 setOnErrorListener { _, _, _ -> true }
                 setDataSource(rutaArchivo)
                 prepareAsync()
-                setOnPreparedListener { it.start(); btnPlayPause.setImageResource(android.R.drawable.ic_media_pause); wavySeekBar.isWaving = true; imgVinyl.isSpinning = true; txtTotalTime.text = formatTime(it.duration); actualizarBarraProgreso(); actualizarNotificacion() }
+                setOnPreparedListener {
+                    it.start()
+                    if (isTvMode && isVideoPrepared) {
+                        try { videoMediaPlayer?.let { vp -> if (!vp.isPlaying) vp.start() } } catch (_: Exception) {}
+                    }
+                    btnPlayPause.setImageResource(android.R.drawable.ic_media_pause); wavySeekBar.isWaving = true; imgVinyl.isSpinning = true; txtTotalTime.text = formatTime(it.duration); actualizarBarraProgreso(); actualizarNotificacion()
+                }
                 setOnCompletionListener { reproducirSiguiente() }
             }
         } catch (e: Exception) {}
@@ -1502,9 +2125,45 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {}
     }
     
-    private fun togglePlayPause() { try { mediaPlayer?.let { if (it.isPlaying) { it.pause(); wavySeekBar.isWaving = false; imgVinyl.isSpinning = false; btnPlayPause.setImageResource(android.R.drawable.ic_media_play) } else { it.start(); wavySeekBar.isWaving = true; imgVinyl.isSpinning = true; btnPlayPause.setImageResource(android.R.drawable.ic_media_pause) }; actualizarNotificacion() } ?: run { if (playlistActual.isNotEmpty()) reproducirCancionActual() } } catch (e:Exception){} }
+    private fun togglePlayPause() {
+        try {
+            mediaPlayer?.let {
+                if (it.isPlaying) {
+                    it.pause()
+                    if (isVideoPrepared) {
+                        try { videoMediaPlayer?.pause() } catch (_: Exception) {}
+                    }
+                    wavySeekBar.isWaving = false; imgVinyl.isSpinning = false; btnPlayPause.setImageResource(android.R.drawable.ic_media_play)
+                } else {
+                    it.start()
+                    if (isVideoPrepared) {
+                        try { videoMediaPlayer?.start() } catch (_: Exception) {}
+                    }
+                    wavySeekBar.isWaving = true; imgVinyl.isSpinning = true; btnPlayPause.setImageResource(android.R.drawable.ic_media_pause)
+                }
+                actualizarNotificacion()
+            } ?: run { if (playlistActual.isNotEmpty()) reproducirCancionActual() }
+        } catch (e: Exception) {}
+    }
+
     private fun reproducirSiguiente() { if (playlistActual.isEmpty()) return; resetLoopState(); currentIndex = (currentIndex + 1) % playlistActual.size; reproducirCancionActual(); if (::queueAdapter.isInitialized) queueAdapter.notifyDataSetChanged() }
-    private fun reproducirAnterior() { if (playlistActual.isEmpty()) return; try { mediaPlayer?.let { if (it.currentPosition > 3000) { it.seekTo(0); actualizarNotificacion(); return } } } catch(e:Exception){}; resetLoopState(); currentIndex = if (currentIndex - 1 < 0) playlistActual.size - 1 else currentIndex - 1; reproducirCancionActual(); if (::queueAdapter.isInitialized) queueAdapter.notifyDataSetChanged() }
+
+    private fun reproducirAnterior() {
+        if (playlistActual.isEmpty()) return
+        try {
+            mediaPlayer?.let {
+                if (it.currentPosition > 3000) {
+                    it.seekTo(0)
+                    if (isVideoPrepared) {
+                        try { videoMediaPlayer?.seekTo(0) } catch (_: Exception) {}
+                    }
+                    actualizarNotificacion()
+                    return
+                }
+            }
+        } catch (e: Exception) {}
+        resetLoopState(); currentIndex = if (currentIndex - 1 < 0) playlistActual.size - 1 else currentIndex - 1; reproducirCancionActual(); if (::queueAdapter.isInitialized) queueAdapter.notifyDataSetChanged()
+    }
     
     private fun actualizarBarraProgreso() {
         handler.postDelayed(object : Runnable {
@@ -1512,7 +2171,14 @@ class MainActivity : AppCompatActivity() {
                 try {
                     mediaPlayer?.let { 
                         if (it.isPlaying && it.duration > 0) { 
-                            wavySeekBar.progress = it.currentPosition.toFloat() / it.duration.toFloat(); txtCurrentTime.text = formatTime(it.currentPosition); actualizarNotificacion() 
+                            wavySeekBar.progress = it.currentPosition.toFloat() / it.duration.toFloat(); txtCurrentTime.text = formatTime(it.currentPosition); actualizarNotificacion()
+                            if (isTvMode && isVideoPrepared) {
+                                videoMediaPlayer?.let { vp ->
+                                    if (vp.isPlaying && vp.duration > 0 && kotlin.math.abs(vp.currentPosition - it.currentPosition) > 650) {
+                                        vp.seekTo(it.currentPosition.coerceAtMost(vp.duration))
+                                    }
+                                }
+                            }
                             if (isCrossfadeEnabled) { val timeRemaining = it.duration - it.currentPosition; if (timeRemaining in 1..4000) { val volume = timeRemaining / 4000f; it.setVolume(volume, volume) } else { it.setVolume(1f, 1f) } }
                         } 
                     }
@@ -1521,6 +2187,7 @@ class MainActivity : AppCompatActivity() {
             }
         }, 1000)
     }
+
     private fun formatTime(ms: Int): String {
         val totalSecs = ms / 1000
         val h = totalSecs / 3600
@@ -1532,7 +2199,15 @@ class MainActivity : AppCompatActivity() {
             String.format("%02d:%02d", m, s)
         }
     }
-    override fun onDestroy() { super.onDestroy(); try{ mediaPlayer?.release() }catch(e:Exception){}; handler.removeCallbacksAndMessages(null) }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        releaseVideoPlayer()
+        try { videoSurface?.release() } catch (_: Exception) {}
+        videoSurface = null
+        try { mediaPlayer?.release() } catch (e: Exception) {}
+        handler.removeCallbacksAndMessages(null)
+    }
 
     fun showAddToPlaylistDialog(songPath: String) {
         val playlistsMap = viewModel.playlists.value
@@ -1550,9 +2225,8 @@ class MainActivity : AppCompatActivity() {
                 val selectedPlaylist = playlistNames[which]
                 viewModel.addSongToPlaylist(songPath, selectedPlaylist) { success ->
                     if (success) {
-                        android.widget.Toast.makeText(this, "✅ Agregada a $selectedPlaylist", android.widget.Toast.LENGTH_SHORT).show()
+                        android.widget.Toast.makeText(this, "Agregada a $selectedPlaylist", android.widget.Toast.LENGTH_SHORT).show()
                         
-                        // Lógica de Seguridad Auto-Like
                         if (selectedPlaylist.contains("fav", ignoreCase = true) || selectedPlaylist.contains("gustas", ignoreCase = true)) {
                             if (!viewModel.isSongLiked(songPath)) {
                                 viewModel.toggleLike(songPath)
@@ -1560,16 +2234,13 @@ class MainActivity : AppCompatActivity() {
                             }
                         }
                     } else {
-                        android.widget.Toast.makeText(this, "❌ Error al agregar archivo", android.widget.Toast.LENGTH_SHORT).show()
+                        android.widget.Toast.makeText(this, "Error al agregar archivo", android.widget.Toast.LENGTH_SHORT).show()
                     }
                 }
             }
             .setNegativeButton("Cancelar", null)
             .show()
     }
-
-
-    
 
     private fun findWaveFillView(view: android.view.View): WaveFillView? {
         if (view is WaveFillView) return view

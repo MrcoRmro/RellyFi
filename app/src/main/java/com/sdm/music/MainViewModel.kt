@@ -247,7 +247,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         } catch (e: Exception) {
             android.os.Handler(android.os.Looper.getMainLooper()).post {
-                    android.widget.Toast.makeText(getApplication(), "🛑 MOTOR DICE: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+                    android.widget.Toast.makeText(getApplication(), "MOTOR DICE: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
                 }
                 
         }

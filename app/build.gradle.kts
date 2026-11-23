@@ -55,4 +55,18 @@ dependencies {
     kapt("androidx.room:room-compiler:2.6.1")
 
     implementation("androidx.work:work-runtime-ktx:2.9.0")
+
+    // AndroidX Media3 (ExoPlayer + MediaSessionService + UI)
+    val media3Version = "1.2.1"
+    implementation("androidx.media3:media3-exoplayer:$media3Version")
+    implementation("androidx.media3:media3-session:$media3Version")
+    implementation("androidx.media3:media3-ui:$media3Version")
+    implementation("androidx.media3:media3-common:$media3Version")
+
+    // ViewPager2 y DocumentFile para Storage Access Framework
+    implementation("androidx.viewpager2:viewpager2:1.0.0")
+    implementation("androidx.documentfile:documentfile:1.0.1")
+
+    // OkHttp para consultas API (LRCLIB lyrics)
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }
