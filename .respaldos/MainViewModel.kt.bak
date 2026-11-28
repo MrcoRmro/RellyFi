@@ -1,0 +1,501 @@
+package com.sdm.music
+
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.io.File
+import com.yausername.youtubedl_android.YoutubeDL
+import com.yausername.youtubedl_android.YoutubeDLRequest
+
+class MainViewModel(application: Application) : AndroidViewModel(application) {
+
+    private val musicRepo = MusicRepository(application)
+    private val ytRepo = YtDlpRepository(application)
+    private val fypCacheDao: FypCacheDao = AppDatabase.getInstance(application).fypCacheDao()
+    private val downloadDao: DownloadDao = AppDatabase.getInstance(application).downloadDao()
+
+    private var fypJob: Job? = null
+    private var lastFypKey: String = ""
+
+    private val _fypHeaderLabel = MutableStateFlow("Canciones recomendadas")
+    val fypHeaderLabel: StateFlow<String> = _fypHeaderLabel
+
+    val pendingDownloadsCount = downloadDao.getPendingCountFlow()
+    val downloadQueue = downloadDao.getAllFlow()
+
+    private val _playlists = MutableStateFlow<Map<String, List<String>>>(emptyMap())
+    val playlists: StateFlow<Map<String, List<String>>> = _playlists
+
+    // --- VARIABLES PARA MAINACTIVITY ---
+    private val _fypRecommendations = MutableStateFlow<List<Map<String, String>>>(emptyList())
+    val fypRecommendations: StateFlow<List<Map<String, String>>> = _fypRecommendations
+
+    private val _isFypLoading = MutableStateFlow(false)
+    val isFypLoading: StateFlow<Boolean> = _isFypLoading
+    // -----------------------------------
+
+    private val _downloadProgress = MutableStateFlow<Map<String, Float>>(emptyMap())
+    val downloadProgress: StateFlow<Map<String, Float>> = _downloadProgress
+
+    private fun cleanArtistName(raw: String): String {
+        return raw
+            .replace(Regex("\\s*[-–_]\\s*(Topic|VEVO|Official|Oficial|Music|Records|Entertainment|Channel|TV|HD|4K|Audio|Video|Lyrics)(\\s|$)", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("\\(.*?\\)", RegexOption.DOT_MATCHES_ALL), "")
+            .replace(Regex("\\[.*?\\]", RegexOption.DOT_MATCHES_ALL), "")
+            .replace(Regex("(?i)\\bprod\\.?\\s+by\\b.*$"), "")
+            .replace("_", " ")
+            .replace(Regex("\\s{2,}"), " ")
+            .trim()
+    }
+
+    private fun splitArtistNames(segment: String): List<String> {
+        if (segment.isBlank()) return emptyList()
+        val stopWords = setOf(
+            "official", "oficial", "audio", "video", "lyrics", "letra",
+            "topic", "unknown", "track", "cancion", "canción", "musica", "música"
+        )
+        return segment
+            .split(Regex("(?i)\\s+(?:ft\\.?|feat\\.?|featuring|vs\\.?|x|y|con|with)\\s+|\\s*[,;&/]\\s*"))
+            .map { cleanArtistName(it) }
+            .filter { it.length >= 2 && it.lowercase() !in stopWords }
+    }
+
+    private fun normalizeTrackTitle(raw: String): String {
+        return raw
+            .substringBeforeLast(".")
+            .replace(Regex("\\(.*?\\)", RegexOption.DOT_MATCHES_ALL), "")
+            .replace(Regex("\\[.*?\\]", RegexOption.DOT_MATCHES_ALL), "")
+            .replace(Regex("(?i)\\b(?:ft\\.?|feat\\.?|featuring)\\b.*$"), "")
+            .replace("_", " ")
+            .lowercase()
+            .replace(Regex("[^a-z0-9áéíóúñü]+"), " ")
+            .trim()
+    }
+
+    private fun extractArtistsForFyp(songTitle: String, metaArtist: String?): List<String> {
+        val rawTitle = songTitle.substringBeforeLast(".").replace("_", " ").trim()
+
+        val featRegex = Regex("(?i)(?:\\(|\\[|\\b)(?:ft\\.?|feat\\.?|featuring|with|con)\\s+([^()\\[\\]\\-–—]+)")
+        val featArtists = featRegex.findAll(rawTitle)
+            .flatMap { splitArtistNames(it.groupValues[1]) }
+            .toList()
+
+        val titleWithoutFeat = rawTitle.replace(featRegex, " ").trim()
+        val mainFromTitle = when {
+            titleWithoutFeat.contains(" - ") -> splitArtistNames(titleWithoutFeat.substringBefore(" - "))
+            titleWithoutFeat.contains(" – ") -> splitArtistNames(titleWithoutFeat.substringBefore(" – "))
+            titleWithoutFeat.contains(" — ") -> splitArtistNames(titleWithoutFeat.substringBefore(" — "))
+            else -> emptyList()
+        }
+
+        val mainFromMeta = if (!metaArtist.isNullOrBlank() && !metaArtist.equals("Unknown", ignoreCase = true)) {
+            splitArtistNames(metaArtist)
+        } else {
+            emptyList()
+        }
+
+        val combined = LinkedHashMap<String, String>()
+        for (artist in (mainFromTitle + mainFromMeta + featArtists)) {
+            val key = artist.lowercase()
+            if (!combined.containsKey(key)) {
+                combined[key] = artist
+            }
+        }
+        return combined.values.take(3)
+    }
+
+    private suspend fun resolveYoutubeChannelArtist(ytUrl: String): String = withContext(Dispatchers.IO) {
+        try {
+            val req = YoutubeDLRequest(ytUrl).also { saveRellySourceUrl(ytUrl) }.apply {
+                addOption("--extractor-args", "youtube:player_client=android,web")
+                addOption("--no-playlist")
+                addOption("--no-warnings")
+                addOption("--skip-download")
+                addOption("--dump-single-json")
+            }
+            val out = YoutubeDL.getInstance().execute(req, null, null).out.orEmpty()
+            if (out.isBlank()) return@withContext ""
+            val json = JSONObject(out)
+            val candidate = json.optString("artist").ifBlank {
+                json.optString("uploader").ifBlank { json.optString("channel") }
+            }
+            cleanArtistName(candidate)
+        } catch (_: Exception) {
+            ""
+        }
+    }
+
+    private fun isNoiseResult(title: String): Boolean {
+        val lower = title.lowercase()
+        val blocked = listOf(
+            "full album", "album completo", "1 hour", "1 hora",
+            "slowed", "reverb", "sped up", "nightcore",
+            "type beat", "instrumental", "karaoke",
+            "reaction", "reaccion", "reacción",
+            "entrevista", "interview", "snippet", "teaser",
+            "playlist", "megamix"
+        )
+        return blocked.any { lower.contains(it) }
+    }
+
+    private suspend fun fetchRecommendationsForSingleArtist(
+        artist: String,
+        currentVideoId: String,
+        currentNormTitle: String,
+        limit: Int
+    ): List<Map<String, String>> {
+        val cacheKey = artist.lowercase().trim()
+        val oneDayAgo = System.currentTimeMillis() - 24 * 60 * 60 * 1000L
+
+        val rawItems: List<Map<String, String>> = if (fypCacheDao.countFreshEntries(cacheKey, oneDayAgo) > 0) {
+            fypCacheDao.getForArtist(cacheKey).map {
+                mapOf("id" to it.videoId, "title" to it.title, "thumbnail" to it.thumbnail)
+            }
+        } else {
+            val fetched = ytRepo.getSongRecommendations("$artist official audio", 16)
+            if (fetched.isNotEmpty()) {
+                fypCacheDao.deleteForArtist(cacheKey)
+                fypCacheDao.insertAll(
+                    fetched.map { r ->
+                        FypCacheEntity(
+                            artistKey = cacheKey,
+                            videoId = r["id"] ?: "",
+                            title = r["title"] ?: "",
+                            thumbnail = r["thumbnail"] ?: ""
+                        )
+                    }
+                )
+            }
+            fetched
+        }
+
+        val cleanCandidates = rawItems.filter { item ->
+            val vid = item["id"].orEmpty()
+            val title = item["title"].orEmpty()
+            vid.isNotBlank() &&
+                vid != currentVideoId &&
+                title.isNotBlank() &&
+                !isNoiseResult(title) &&
+                normalizeTrackTitle(title) != currentNormTitle
+        }
+
+        val artistLower = artist.lowercase()
+        val strictMatches = cleanCandidates.filter { item ->
+            val titleLower = item["title"].orEmpty().lowercase()
+            val channelLower = item["channel"].orEmpty().lowercase()
+            titleLower.contains(artistLower) || channelLower.contains(artistLower)
+        }
+
+        val pool = if (strictMatches.size >= 3) strictMatches else cleanCandidates
+        return pool.take(limit)
+    }
+
+    init {
+        // Limpiador: Borra descargas interrumpidas al iniciar
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val baseDir = File(getApplication<Application>().getExternalFilesDir(null), "Base-Musica")
+                if (baseDir.exists()) {
+                    baseDir.walkTopDown().forEach { file ->
+                        if (file.isFile && (file.extension == "part" || file.extension == "ytdl" || file.name.endsWith(".temp"))) {
+                            file.delete()
+                        }
+                    }
+                }
+                val pending = downloadDao.getNextPending()
+                if (pending != null) {
+                    PlaylistDownloadWorker.enqueueWork(getApplication())
+                }
+            } catch (_: Exception) { }
+        }
+        loadLocalMusic()
+    }
+
+    fun loadLocalMusic() {
+        viewModelScope.launch(Dispatchers.IO) { _playlists.value = musicRepo.getPlaylists() }
+    }
+
+    fun toggleLike(path: String): Boolean {
+        val isLiked = musicRepo.toggleLike(path)
+        loadLocalMusic()
+        return isLiked
+    }
+
+    fun isSongLiked(path: String): Boolean {
+        val name = path.substringAfterLast("/")
+        return _playlists.value["Mi favs"]?.any { it.endsWith(name) } == true
+    }
+
+    fun addSongToPlaylist(songPath: String, playlistName: String, onResult: (Boolean) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val file = File(songPath)
+                if (file.exists()) {
+                    val baseDir = file.parentFile?.parentFile ?: file.parentFile
+                    val destDir = File(baseDir, playlistName)
+                    if (!destDir.exists()) destDir.mkdirs()
+
+                    val destFile = File(destDir, file.name)
+                    if (!destFile.exists()) {
+                        file.copyTo(destFile)
+                    }
+                    loadLocalMusic()
+                    withContext(Dispatchers.Main) { onResult(true) }
+                }
+            } catch (_: Exception) { }
+        }
+    }
+
+    fun triggerFypForSong(songPath: String, songTitle: String) {
+        fypJob?.cancel()
+        fypJob = viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val metadata = if (!songPath.startsWith("LIVE_STREAM|")) {
+                    musicRepo.getSongMetadata(songPath)
+                } else emptyMap()
+
+                val metaArtist = metadata["artist"]
+                var artists = extractArtistsForFyp(songTitle, metaArtist)
+
+                val currentYtUrl = if (songPath.startsWith("LIVE_STREAM|")) {
+                    songPath.split("|").getOrNull(4).orEmpty()
+                } else ""
+                val currentVideoId = currentYtUrl.substringAfter("v=", "").substringBefore("&")
+                val currentNormTitle = normalizeTrackTitle(songTitle)
+
+                if (artists.isEmpty() && currentYtUrl.isNotBlank()) {
+                    val ytArtist = resolveYoutubeChannelArtist(currentYtUrl)
+                    if (ytArtist.isNotBlank()) {
+                        artists = extractArtistsForFyp("$ytArtist - $songTitle", ytArtist)
+                    }
+                }
+
+                val cleanFallbackTitle = cleanArtistName(songTitle.substringBeforeLast(".").replace("_", " "))
+                val sessionKey = if (artists.isNotEmpty()) {
+                    artists.joinToString("|") { it.lowercase() } + "#$currentNormTitle"
+                } else {
+                    "fallback:${cleanFallbackTitle.lowercase()}"
+                }
+
+                if (sessionKey == lastFypKey && _fypRecommendations.value.isNotEmpty()) {
+                    return@launch
+                }
+
+                withContext(Dispatchers.Main) {
+                    _isFypLoading.value = true
+                    _fypHeaderLabel.value = when {
+                        artists.size > 1 -> "Recomendadas: ${artists.joinToString(" & ")}"
+                        artists.size == 1 -> "Más de ${artists[0]}"
+                        else -> "Canciones recomendadas"
+                    }
+                }
+
+                val finalResults: List<Map<String, String>> = if (artists.isNotEmpty()) {
+                    val perArtistLimit = if (artists.size == 1) 14 else 8
+                    val listsByArtist = coroutineScope {
+                        artists.map { artist ->
+                            async {
+                                fetchRecommendationsForSingleArtist(
+                                    artist = artist,
+                                    currentVideoId = currentVideoId,
+                                    currentNormTitle = currentNormTitle,
+                                    limit = perArtistLimit
+                                )
+                            }
+                        }.awaitAll()
+                    }
+
+                    val interleaved = mutableListOf<Map<String, String>>()
+                    val seenIds = HashSet<String>()
+                    val seenTitles = HashSet<String>()
+                    val maxLen = listsByArtist.maxOfOrNull { it.size } ?: 0
+
+                    for (i in 0 until maxLen) {
+                        for (artistList in listsByArtist) {
+                            if (i < artistList.size) {
+                                val item = artistList[i]
+                                val vid = item["id"].orEmpty()
+                                val norm = normalizeTrackTitle(item["title"].orEmpty())
+                                if (vid.isNotBlank() && seenIds.add(vid) && seenTitles.add(norm)) {
+                                    interleaved.add(item)
+                                }
+                            }
+                        }
+                        if (interleaved.size >= 14) break
+                    }
+                    interleaved
+                } else {
+                    val query = if (cleanFallbackTitle.length >= 2) "$cleanFallbackTitle official audio" else "musica recomendada"
+                    ytRepo.getSongRecommendations(query, 12)
+                        .filter { !isNoiseResult(it["title"].orEmpty()) }
+                }
+
+                if (finalResults.isNotEmpty()) {
+                    lastFypKey = sessionKey
+                    withContext(Dispatchers.Main) {
+                        _fypRecommendations.value = finalResults
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("RellyFi", "Error en triggerFypForSong: ${e.message}", e)
+            } finally {
+                withContext(Dispatchers.Main) { _isFypLoading.value = false }
+            }
+        }
+    }
+
+    suspend fun resolveLiveStreamUrl(videoId: String): String {
+        val searchResults = ytRepo.searchYoutube(videoId, 1)
+        if (searchResults.isNotEmpty()) {
+            val realId = searchResults[0]["id"] ?: return ""
+            return ytRepo.getStreamUrl(realId)
+        }
+        return ""
+    }
+
+    // --- MOTOR DE DESCARGA SIMPLE (1x1) ---
+    private fun executeSingleDownload(url: String, playlistName: String) {
+        try {
+            val destFolder = File(getApplication<Application>().getExternalFilesDir(null), "Base-Musica/$playlistName")
+            if (!destFolder.exists()) destFolder.mkdirs()
+
+            val req = YoutubeDLRequest(url).also { saveRellySourceUrl(url) }
+            req.addOption("--extractor-args", "youtube:player_client=android,web")
+            req.addOption("--compat-options", "no-youtube-unavailable-videos")
+            req.addOption("-x")
+            req.addOption("--audio-format", "m4a")
+            req.addOption("--concurrent-fragments", "4")
+            req.addOption("--embed-thumbnail")
+            req.addOption("--embed-metadata")
+            req.addOption("-o", File(destFolder, "%(title)s.%(ext)s").absolutePath)
+
+            var isConverting = false
+            var convertTick = 0f
+
+            YoutubeDL.getInstance().execute(req, null) { progress, _, line ->
+                val text = line?.lowercase() ?: ""
+                if (progress >= 99f || text.contains("[extractaudio]")) {
+                    isConverting = true
+                }
+
+                val p = if (progress < 0f) 0f else (progress / 100f)
+                val trackProgress = when {
+                    isConverting -> {
+                        convertTick += 0.015f
+                        0.75f + convertTick.coerceAtMost(0.24f)
+                    }
+                    else -> p * 0.75f
+                }
+
+                val currentMap = _downloadProgress.value.toMutableMap()
+                currentMap[playlistName] = trackProgress
+                _downloadProgress.value = currentMap
+            }
+        } catch (e: Exception) {
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                android.widget.Toast.makeText(getApplication(), "MOTOR DICE: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    fun downloadSingleTrack(url: String, playlistName: String, onResult: (Boolean) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                var map = _downloadProgress.value.toMutableMap()
+                map[playlistName] = 0.01f
+                _downloadProgress.value = map
+
+                executeSingleDownload(url, playlistName)
+
+                map = _downloadProgress.value.toMutableMap()
+                map.remove(playlistName)
+                _downloadProgress.value = map
+                loadLocalMusic()
+
+                withContext(Dispatchers.Main) { onResult(true) }
+            } catch (_: Exception) { }
+        }
+    }
+
+    fun registerPlaylistForDownload(
+        playlistUrl: String,
+        folderName: String? = null,
+        onStatus: ((String) -> Unit)? = null,
+        onFinished: ((Int, String) -> Unit)? = null
+    ) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                withContext(Dispatchers.Main) { onStatus?.invoke("Leyendo lista de canciones...") }
+
+                val (playlistTitle, tracks) = ytRepo.extractPlaylistTracks(playlistUrl)
+
+                if (tracks.isEmpty()) {
+                    withContext(Dispatchers.Main) { onFinished?.invoke(0, "No se encontraron canciones en el enlace") }
+                    return@launch
+                }
+
+                val finalFolderName = if (!folderName.isNullOrBlank()) folderName.trim() else playlistTitle.replace("/", "_").trim()
+
+                val entities = tracks.map { track ->
+                    val vid = track["id"] ?: ""
+                    DownloadItemEntity(
+                        playlistName = finalFolderName,
+                        playlistUrl = playlistUrl,
+                        videoId = vid,
+                        videoUrl = "https://www.youtube.com/watch?v=$vid",
+                        title = track["title"] ?: "Canción",
+                        thumbnail = track["thumbnail"] ?: "",
+                        status = "PENDIENTE"
+                    )
+                }
+
+                downloadDao.insertAll(entities)
+                PlaylistDownloadWorker.enqueueWork(getApplication())
+
+                withContext(Dispatchers.Main) {
+                    onFinished?.invoke(entities.size, finalFolderName)
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    onFinished?.invoke(0, "Error: ${e.message}")
+                }
+            }
+        }
+    }
+}
+
+
+private fun saveRellySourceUrl(rawUrl: String?, titleHint: String? = null) {
+    val url = rawUrl?.trim() ?: return
+    if (!url.contains("youtu")) return
+    try {
+        val baseDir = android.os.Environment.getExternalStorageDirectory()
+        val pkgDir = java.io.File(baseDir, "Android/data/com.sdm.music/files/Base-Lyrics").apply { mkdirs() }
+        val mapFile = java.io.File(pkgDir, ".sources.json")
+        val json = if (mapFile.exists()) {
+            try { org.json.JSONObject(mapFile.readText(Charsets.UTF_8)) } catch (_: Exception) { org.json.JSONObject() }
+        } else {
+            org.json.JSONObject()
+        }
+        val idMatch = Regex("(?:v=|youtu\\.be/|shorts/|embed/)([a-zA-Z0-9_-]{11})").find(url)
+        val vid = idMatch?.groupValues?.get(1) ?: ""
+        if (vid.isNotEmpty()) {
+            json.put("last_url", url)
+            json.put("vid_$vid", url)
+            if (!titleHint.isNullOrBlank()) {
+                json.put(titleHint.trim().lowercase(), url)
+            }
+            mapFile.writeText(json.toString(), Charsets.UTF_8)
+        }
+    } catch (_: Exception) {}
+}

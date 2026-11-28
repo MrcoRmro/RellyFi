@@ -22,7 +22,7 @@ android {
         minSdk = 24
         targetSdk = 34
         versionCode = 1
-        versionName = "V2.0"
+        versionName = "V2.1"
     }
 
     compileOptions {
@@ -32,15 +32,6 @@ android {
 
     kotlinOptions {
         jvmTarget = "17"
-    }
-
-    splits {
-        abi {
-            isEnable = true
-            reset()
-            include("arm64-v8a")
-            isUniversalApk = true
-        }
     }
 }
 
@@ -83,12 +74,6 @@ dependencies {
 android.applicationVariants.configureEach {
     outputs.all {
         val outputImpl = this as com.android.build.gradle.internal.api.ApkVariantOutputImpl
-        val abiName = outputImpl.getFilter(com.android.build.api.variant.FilterConfiguration.FilterType.ABI.name)
-        val label = when (abiName) {
-            null -> "universal"
-            "arm64-v8a" -> "arm"
-            else -> abiName
-        }
-        outputImpl.outputFileName = "REllyFi $label ${versionName}.apk"
+        outputImpl.outputFileName = "REllyFi ${versionName}.apk"
     }
 }

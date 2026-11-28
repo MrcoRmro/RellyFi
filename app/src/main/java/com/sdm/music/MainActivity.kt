@@ -3,6 +3,7 @@ package com.sdm.music
 import android.Manifest
 import android.animation.ArgbEvaluator
 import android.animation.ValueAnimator
+import android.view.animation.AccelerateDecelerateInterpolator
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -61,6 +62,14 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.hypot
 import kotlin.math.min
 import kotlin.math.sin
+import android.content.pm.ActivityInfo
+import android.media.audiofx.Visualizer
+import android.view.WindowInsets
+import android.view.WindowInsetsController
+import androidx.activity.OnBackPressedCallback
+import org.json.JSONArray
+import org.json.JSONObject
+import java.net.URLEncoder
 
 fun TextView.applyContrastingText(isDark: Boolean) {
     if (isDark) {
@@ -96,15 +105,48 @@ val THEMES = mapOf(
 )
 
 class WaveMeshGradientView(context: Context) : View(context) {
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG); private var time = 0f; var theme: ThemeColors = THEMES["Blanco con rojo"]!!
-    private val handlerAnim = Handler(Looper.getMainLooper()); private val runnable = object : Runnable { override fun run() { time += 0.02f; invalidate(); handlerAnim.postDelayed(this, 30) } }
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private var time = 0f
+    var theme: ThemeColors = THEMES["Blanco con rojo"]!!
+    var bassEnergy: Float = 0f
+    var midEnergy: Float = 0f
+
+    private val handlerAnim = Handler(Looper.getMainLooper())
+    private val runnable = object : Runnable {
+        override fun run() {
+            time += 0.02f + (bassEnergy * 0.032f)
+            bassEnergy = (bassEnergy * 0.88f).let { if (it < 0.005f) 0f else it }
+            midEnergy = (midEnergy * 0.90f).let { if (it < 0.005f) 0f else it }
+            invalidate()
+            handlerAnim.postDelayed(this, 30)
+        }
+    }
     init { handlerAnim.post(runnable) }
+
     override fun onDraw(canvas: Canvas) {
-        super.onDraw(canvas); val w = width.toFloat(); val h = height.toFloat(); if (w == 0f || h == 0f) return
+        super.onDraw(canvas)
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (w == 0f || h == 0f) return
         canvas.drawColor(theme.bgBase)
-        paint.shader = RadialGradient(w * 0.3f + sin(time) * 120f, h * 0.5f + sin(time * 0.8f) * 180f, w * 0.65f, intArrayOf(theme.w1c1, theme.w1c2, Color.TRANSPARENT), floatArrayOf(0f, 0.5f, 1f), Shader.TileMode.CLAMP); canvas.drawCircle(w * 0.3f + sin(time) * 120f, h * 0.5f + sin(time * 0.8f) * 180f, w * 0.65f, paint)
-        paint.shader = RadialGradient(w * 0.8f + sin(time * 1.2f) * 100f, h * 0.25f + sin(time * 0.5f) * 150f, w * 0.6f, intArrayOf(theme.w2c1, theme.w2c2, Color.TRANSPARENT), floatArrayOf(0f, 0.45f, 1f), Shader.TileMode.CLAMP); canvas.drawCircle(w * 0.8f + sin(time * 1.2f) * 100f, h * 0.25f + sin(time * 0.5f) * 150f, w * 0.6f, paint)
-        paint.shader = RadialGradient(w * 0.7f + sin(time * 0.7f) * 140f, h * 0.8f + sin(time * 1.1f) * 120f, w * 0.55f, intArrayOf(theme.w3c, Color.TRANSPARENT), floatArrayOf(0f, 1f), Shader.TileMode.CLAMP); canvas.drawCircle(w * 0.7f + sin(time * 0.7f) * 140f, h * 0.8f + sin(time * 1.1f) * 120f, w * 0.55f, paint)
+
+        val r1 = w * (0.65f + bassEnergy * 0.18f)
+        val cx1 = w * 0.3f + sin(time) * (120f + bassEnergy * 45f)
+        val cy1 = h * 0.5f + sin(time * 0.8f) * 180f
+        paint.shader = RadialGradient(cx1, cy1, r1, intArrayOf(theme.w1c1, theme.w1c2, Color.TRANSPARENT), floatArrayOf(0f, 0.5f, 1f), Shader.TileMode.CLAMP)
+        canvas.drawCircle(cx1, cy1, r1, paint)
+
+        val r2 = w * (0.60f + midEnergy * 0.16f)
+        val cx2 = w * 0.8f + sin(time * 1.2f) * 100f
+        val cy2 = h * 0.25f + sin(time * 0.5f) * (150f + midEnergy * 35f)
+        paint.shader = RadialGradient(cx2, cy2, r2, intArrayOf(theme.w2c1, theme.w2c2, Color.TRANSPARENT), floatArrayOf(0f, 0.45f, 1f), Shader.TileMode.CLAMP)
+        canvas.drawCircle(cx2, cy2, r2, paint)
+
+        val r3 = w * (0.55f + bassEnergy * 0.12f)
+        val cx3 = w * 0.7f + sin(time * 0.7f) * 140f
+        val cy3 = h * 0.8f + sin(time * 1.1f) * 120f
+        paint.shader = RadialGradient(cx3, cy3, r3, intArrayOf(theme.w3c, Color.TRANSPARENT), floatArrayOf(0f, 1f), Shader.TileMode.CLAMP)
+        canvas.drawCircle(cx3, cy3, r3, paint)
     }
     override fun onDetachedFromWindow() { super.onDetachedFromWindow(); handlerAnim.removeCallbacks(runnable) }
 }
@@ -123,39 +165,114 @@ class WaveFillView(context: Context) : View(context) {
 }
 
 class RadialLikeButton(context: Context) : View(context) {
-    var isLiked = false; private set
-    var themeColors: ThemeColors? = null; set(value) { field = value; invalidate() }
-    private var touchX = 0f; private var touchY = 0f; private var rippleRadius = 0f; var onClickAction: (() -> Unit)? = null
-    private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 5f }
-    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
-    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER; textSize = 33f; typeface = Typeface.DEFAULT_BOLD }
-    fun setLikedState(liked: Boolean) { isLiked = liked; rippleRadius = if (liked) 9999f else 0f; invalidate() }
+    var isLiked: Boolean = false
+        private set
+
+    var themeColors: ThemeColors? = null
+        set(value) {
+            field = value
+            invalidate()
+        }
+
+    var onToggleLike: ((Boolean) -> Unit)? = null
+    var onClickAction: (() -> Unit)? = null
+
+    private var touchX: Float = 0f
+    private var touchY: Float = 0f
+    private var rippleRadius: Float = 0f
+    private var activeAnimator: ValueAnimator? = null
+
+    private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 5f
+    }
+    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        textAlign = Paint.Align.CENTER
+        textSize = 33f
+        typeface = Typeface.DEFAULT_BOLD
+    }
+
+    init {
+        isClickable = true
+        isFocusable = true
+    }
+
+    fun setLikedState(liked: Boolean, animate: Boolean = false) {
+        activeAnimator?.cancel()
+        isLiked = liked
+        val maxRadius = hypot(width.toDouble(), height.toDouble()).toFloat()
+        if (!animate || maxRadius <= 0f) {
+            rippleRadius = if (liked) 9999f else 0f
+            invalidate()
+            return
+        }
+        val startR = if (liked) 0f else maxRadius
+        val endR = if (liked) maxRadius else 0f
+        activeAnimator = ValueAnimator.ofFloat(startR, endR).apply {
+            duration = 400L
+            addUpdateListener {
+                rippleRadius = it.animatedValue as Float
+                invalidate()
+            }
+            start()
+        }
+    }
+
     override fun onTouchEvent(event: MotionEvent): Boolean {
-        when (event.action) {
-            MotionEvent.ACTION_DOWN -> { touchX = event.x; touchY = event.y; return true }
-            MotionEvent.ACTION_UP -> { 
-                isLiked = !isLiked 
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                touchX = event.x
+                touchY = event.y
+                return true
+            }
+            MotionEvent.ACTION_UP -> {
+                isLiked = !isLiked
                 val maxRadius = hypot(width.toDouble(), height.toDouble()).toFloat()
-                val anim = ValueAnimator.ofFloat(if (isLiked) 0f else maxRadius, if (isLiked) maxRadius else 0f)
-                anim.duration = 400; anim.addUpdateListener { rippleRadius = it.animatedValue as Float; invalidate() }; anim.start()
-                onClickAction?.invoke(); return true 
+                activeAnimator?.cancel()
+                activeAnimator = ValueAnimator.ofFloat(
+                    if (isLiked) 0f else maxRadius,
+                    if (isLiked) maxRadius else 0f
+                ).apply {
+                    duration = 400L
+                    addUpdateListener {
+                        rippleRadius = it.animatedValue as Float
+                        invalidate()
+                    }
+                    start()
+                }
+                onToggleLike?.invoke(isLiked)
+                onClickAction?.invoke()
+                return true
             }
         }
         return super.onTouchEvent(event)
     }
+
     override fun onDraw(canvas: Canvas) {
-        super.onDraw(canvas); val rect = RectF(0f, 0f, width.toFloat(), height.toFloat())
-        themeColors?.let { strokePaint.color = it.accent; fillPaint.color = it.accent }
+        super.onDraw(canvas)
+        val rect = RectF(0f, 0f, width.toFloat(), height.toFloat())
+        themeColors?.let {
+            strokePaint.color = it.accent
+            fillPaint.color = it.accent
+        }
         canvas.drawRoundRect(rect, 40f, 40f, strokePaint)
+
         val maxR = hypot(width.toDouble(), height.toDouble()).toFloat()
         val drawRadius = if (rippleRadius >= 9999f) maxR else rippleRadius
-        if (drawRadius > 0f) { 
-            canvas.save(); val path = Path().apply { addRoundRect(rect, 40f, 40f, Path.Direction.CW) }
+        if (drawRadius > 0f) {
+            canvas.save()
+            val path = Path().apply { addRoundRect(rect, 40f, 40f, Path.Direction.CW) }
             canvas.clipPath(path)
-            val cx = if (touchX == 0f) width / 2f else touchX; val cy = if (touchY == 0f) height / 2f else touchY
-            canvas.drawCircle(cx, cy, drawRadius, fillPaint); canvas.restore() 
+            val cx = if (touchX == 0f) width / 2f else touchX
+            val cy = if (touchY == 0f) height / 2f else touchY
+            canvas.drawCircle(cx, cy, drawRadius, fillPaint)
+            canvas.restore()
         }
-        themeColors?.let { 
+
+        themeColors?.let {
             val isDark = it.isDark
             val c = if (drawRadius > width / 3f) Color.WHITE else (if (isDark) Color.WHITE else Color.BLACK)
             textPaint.color = c
@@ -163,6 +280,11 @@ class RadialLikeButton(context: Context) : View(context) {
         }
         val textY = (height / 2f) - ((textPaint.descent() + textPaint.ascent()) / 2f)
         canvas.drawText("LIKE", width / 2f, textY, textPaint)
+    }
+
+    override fun onDetachedFromWindow() {
+        super.onDetachedFromWindow()
+        activeAnimator?.cancel()
     }
 }
 
@@ -250,17 +372,190 @@ class SwipePagingScrollView(context: Context) : HorizontalScrollView(context) {
 
 class VinylDiskView(context: Context) : View(context) {
     var bitmap: Bitmap? = null; set(value) { field = value; invalidate() }
-    var isSpinning = false; var holeColor: Int = Color.WHITE; private var spinRotation = 0f
-    private val handlerAnim = Handler(Looper.getMainLooper()); private val runnable = object : Runnable { override fun run() { if (isSpinning) { spinRotation = (spinRotation + 0.5f) % 360f; rotation = spinRotation }; handlerAnim.postDelayed(this, 16) } }
-    init { handlerAnim.post(runnable) }
-    override fun onDraw(canvas: Canvas) {
-        super.onDraw(canvas); val cx = width / 2f; val cy = height / 2f; val radius = width.coerceAtMost(height) / 2f; canvas.drawCircle(cx, cy, radius, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#121212") })
-        for (i in 1..6) canvas.drawCircle(cx, cy, radius - (i * (radius / 8f)), Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#2A2A2A"); style = Paint.Style.STROKE; strokeWidth = 2f })
-        val artRadius = radius * 0.45f
-        bitmap?.let { bmp -> val pathClip = Path().apply { addCircle(cx, cy, artRadius, Path.Direction.CW) }; canvas.save(); canvas.clipPath(pathClip); val scale = (artRadius * 2) / bmp.width.coerceAtMost(bmp.height).toFloat(); val matrixTransform = Matrix().apply { setScale(scale, scale); postTranslate(cx - (bmp.width * scale) / 2f, cy - (bmp.height * scale) / 2f) }; canvas.drawBitmap(bmp, matrixTransform, null); canvas.restore() } ?: run { canvas.drawCircle(cx, cy, artRadius, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.DKGRAY }) }
-        canvas.drawCircle(cx, cy, radius * 0.05f, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = holeColor })
+    var isSpinning = false
+    var holeColor: Int = Color.WHITE
+    var beatPulse: Float = 0f
+    var midPulse: Float = 0f
+    var pulseColor: Int = Color.parseColor("#D50000")
+    var secondaryPulseColor: Int = Color.parseColor("#FF6D00")
+
+    private var spinRotation = 0f
+    private var wavePhase1 = 0f
+    private var wavePhase2 = 1.9f
+    private var sweepAngle = 0f
+
+    private val ringCount = 18
+    private val steps = 128
+    private val cosTable = FloatArray(steps + 1)
+    private val sinTable = FloatArray(steps + 1)
+    private val wavePath = Path()
+    private val meshPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
     }
-    override fun onDetachedFromWindow() { super.onDetachedFromWindow(); handlerAnim.removeCallbacks(runnable) }
+    private val coreGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+    private val diskBasePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#101012") }
+    private val groovePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#26262B")
+        style = Paint.Style.STROKE
+        strokeWidth = 2f
+    }
+    private val rimPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+    private val holePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val placeholderArtPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.DKGRAY }
+    private val clipPath = Path()
+    private val artMatrix = Matrix()
+    private val sweepMatrix = Matrix()
+
+    private val handlerAnim = Handler(Looper.getMainLooper())
+    private val runnable = object : Runnable {
+        override fun run() {
+            var needsRedraw = false
+            val twoPi = (kotlin.math.PI * 2.0).toFloat()
+            if (isSpinning) {
+                spinRotation = (spinRotation + 0.55f) % 360f
+                sweepAngle = (sweepAngle + 0.9f) % 360f
+                val boost = 1f + beatPulse * 1.45f + midPulse * 0.85f
+                wavePhase1 = (wavePhase1 + 0.042f * boost) % twoPi
+                wavePhase2 -= 0.031f * boost
+                if (wavePhase2 < 0f) wavePhase2 += twoPi
+                needsRedraw = true
+            } else if (beatPulse > 0.005f || midPulse > 0.005f) {
+                wavePhase1 = (wavePhase1 + 0.022f) % twoPi
+                needsRedraw = true
+            }
+
+            if (beatPulse > 0.005f) {
+                beatPulse *= 0.87f
+                if (beatPulse < 0.005f) beatPulse = 0f
+                needsRedraw = true
+            }
+            if (midPulse > 0.005f) {
+                midPulse *= 0.88f
+                if (midPulse < 0.005f) midPulse = 0f
+                needsRedraw = true
+            }
+            if (needsRedraw) invalidate()
+            handlerAnim.postDelayed(this, 16)
+        }
+    }
+
+    init {
+        val twoPi = kotlin.math.PI * 2.0
+        for (i in 0..steps) {
+            val theta = (i.toDouble() / steps) * twoPi
+            cosTable[i] = kotlin.math.cos(theta).toFloat()
+            sinTable[i] = kotlin.math.sin(theta).toFloat()
+        }
+        handlerAnim.post(runnable)
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        val cx = width / 2f
+        val cy = height / 2f
+        val maxRadius = width.coerceAtMost(height) / 2f
+        if (maxRadius <= 0f) return
+
+        val baseRadius = maxRadius * 0.69f
+        val diskRadius = baseRadius * (1f + beatPulse * 0.022f)
+        val idleFlow = if (isSpinning) 0.22f else 0.05f
+        val energy = (beatPulse * 0.90f + midPulse * 0.50f + idleFlow).coerceIn(0.05f, 1.35f)
+
+        val cPrimary = pulseColor
+        val cSecondary = secondaryPulseColor
+        val cHighlight = ColorUtils.blendARGB(cPrimary, Color.WHITE, 0.52f)
+        val cBridge = ColorUtils.blendARGB(cSecondary, cHighlight, 0.45f)
+
+        // Halo suave pegado al borde del vinilo
+        coreGlowPaint.color = ColorUtils.setAlphaComponent(cHighlight, (75 + 115 * energy).toInt().coerceIn(0, 220))
+        coreGlowPaint.strokeWidth = 7f + 8f * energy
+        canvas.drawCircle(cx, cy, diskRadius + 2f, coreGlowPaint)
+
+        // Shader radial giratorio con los colores del tema actual / tema dinámico
+        val sweep = SweepGradient(
+            cx, cy,
+            intArrayOf(cPrimary, cHighlight, cSecondary, cBridge, cPrimary),
+            floatArrayOf(0f, 0.28f, 0.56f, 0.82f, 1f)
+        )
+        sweepMatrix.reset()
+        sweepMatrix.setRotate(sweepAngle, cx, cy)
+        sweep.setLocalMatrix(sweepMatrix)
+        meshPaint.shader = sweep
+
+        val maxBandWidth = (maxRadius - diskRadius - 3f).coerceAtLeast(10f)
+        val twoPi = (kotlin.math.PI * 2.0).toFloat()
+
+        // 18 anillos concéntricos finos que se entrelazan y expanden como malla de frecuencia
+        for (ringIdx in 0 until ringCount) {
+            val t = ringIdx.toFloat() / (ringCount - 1).toFloat() // 0f interno -> 1f externo
+            val falloff = (1f - t) * (1f - t)
+            val alpha = ((26 + 215 * falloff * (0.45f + 0.55f * energy))).toInt().coerceIn(10, 245)
+
+            meshPaint.alpha = alpha
+            meshPaint.strokeWidth = (2.3f - 1.15f * t).coerceAtLeast(0.95f)
+
+            val radialRest = diskRadius + maxBandWidth * (0.04f + 0.68f * t)
+            val amp1 = maxBandWidth * (0.04f + 0.24f * energy) * (0.35f + 0.65f * kotlin.math.sin(t * kotlin.math.PI.toFloat()))
+            val amp2 = maxBandWidth * (0.02f + 0.14f * (midPulse + idleFlow * 0.6f)) * (0.4f + 0.6f * t)
+            val phaseShift = t * 1.45f
+
+            wavePath.reset()
+            for (i in 0..steps) {
+                val theta = (i.toFloat() / steps) * twoPi
+                val harmonicA = kotlin.math.sin(5f * theta + wavePhase1 + phaseShift)
+                val harmonicB = kotlin.math.cos(8f * theta - wavePhase2 - phaseShift * 1.3f)
+                val harmonicC = kotlin.math.sin(3f * theta + wavePhase1 * 0.7f - t * 0.9f)
+
+                val displacement = amp1 * harmonicA + amp2 * harmonicB + (amp1 * 0.45f) * harmonicC
+                val r = (radialRest + displacement).coerceIn(diskRadius + 1f, maxRadius - 2f)
+
+                val x = cx + r * cosTable[i]
+                val y = cy + r * sinTable[i]
+                if (i == 0) wavePath.moveTo(x, y) else wavePath.lineTo(x, y)
+            }
+            wavePath.close()
+            canvas.drawPath(wavePath, meshPaint)
+        }
+
+        // Disco de vinilo giratorio en el centro
+        canvas.save()
+        canvas.rotate(spinRotation, cx, cy)
+
+        canvas.drawCircle(cx, cy, diskRadius, diskBasePaint)
+        for (i in 1..6) {
+            canvas.drawCircle(cx, cy, diskRadius - (i * (diskRadius / 8f)), groovePaint)
+        }
+
+        rimPaint.color = ColorUtils.setAlphaComponent(cHighlight, (130 + 125 * beatPulse).toInt().coerceIn(0, 255))
+        rimPaint.strokeWidth = 2.6f + beatPulse * 3.5f
+        canvas.drawCircle(cx, cy, diskRadius, rimPaint)
+
+        val artRadius = diskRadius * 0.47f
+        bitmap?.let { bmp ->
+            clipPath.reset()
+            clipPath.addCircle(cx, cy, artRadius, Path.Direction.CW)
+            canvas.save()
+            canvas.clipPath(clipPath)
+            val scale = (artRadius * 2) / bmp.width.coerceAtMost(bmp.height).toFloat()
+            artMatrix.reset()
+            artMatrix.setScale(scale, scale)
+            artMatrix.postTranslate(cx - (bmp.width * scale) / 2f, cy - (bmp.height * scale) / 2f)
+            canvas.drawBitmap(bmp, artMatrix, null)
+            canvas.restore()
+        } ?: run {
+            canvas.drawCircle(cx, cy, artRadius, placeholderArtPaint)
+        }
+
+        holePaint.color = holeColor
+        canvas.drawCircle(cx, cy, diskRadius * 0.055f, holePaint)
+        canvas.restore()
+    }
+
+    override fun onDetachedFromWindow() {
+        super.onDetachedFromWindow()
+        handlerAnim.removeCallbacks(runnable)
+    }
 }
 
 class WavySeekBar(context: Context) : View(context) {
@@ -320,6 +615,533 @@ class QueueAdapter(var songs: MutableList<String>, private var currentIndexProvi
     fun onItemMove(fromPosition: Int, toPosition: Int) { if (fromPosition < toPosition) { for (i in fromPosition until toPosition) Collections.swap(songs, i, i + 1) } else { for (i in fromPosition downTo toPosition + 1) Collections.swap(songs, i, i - 1) }; notifyItemMoved(fromPosition, toPosition) }
 }
 
+class CrtOverlayView(context: Context) : View(context) {
+    enum class Mode(val label: String) {
+        OFF("FILTRO: OFF"),
+        CRT("FILTRO: CRT"),
+        VHS("FILTRO: VHS")
+    }
+
+    var mode: Mode = Mode.OFF
+        set(value) {
+            field = value
+            visibility = if (value == Mode.OFF) GONE else VISIBLE
+            if (value != Mode.OFF) {
+                handlerAnim.removeCallbacks(runnable)
+                handlerAnim.post(runnable)
+            } else {
+                handlerAnim.removeCallbacks(runnable)
+            }
+            invalidate()
+        }
+
+    private var scanOffset = 0f
+    private var trackingY = 0f
+    private val scanPaint = Paint().apply { strokeWidth = 2f }
+    private val barPaint = Paint().apply { style = Paint.Style.FILL }
+    private val vignettePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val handlerAnim = Handler(Looper.getMainLooper())
+    private val runnable = object : Runnable {
+        override fun run() {
+            if (mode == Mode.OFF) return
+            scanOffset = (scanOffset + 1f) % 6f
+            trackingY += if (mode == Mode.VHS) 4.5f else 1.5f
+            if (height > 0 && trackingY > height + 60f) trackingY = -60f
+            invalidate()
+            handlerAnim.postDelayed(this, 45L)
+        }
+    }
+
+    fun cycleMode(): Mode {
+        mode = when (mode) {
+            Mode.OFF -> Mode.CRT
+            Mode.CRT -> Mode.VHS
+            Mode.VHS -> Mode.OFF
+        }
+        return mode
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        if (mode == Mode.OFF) return
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (w <= 0f || h <= 0f) return
+
+        scanPaint.color = if (mode == Mode.CRT) Color.parseColor("#38000000") else Color.parseColor("#2A000000")
+        var y = scanOffset
+        while (y < h) {
+            canvas.drawLine(0f, y, w, y, scanPaint)
+            y += 6f
+        }
+
+        if (mode == Mode.VHS) {
+            canvas.drawColor(Color.parseColor("#1018FFFF"))
+            barPaint.color = Color.parseColor("#22FFFFFF")
+            canvas.drawRect(0f, trackingY, w, trackingY + 26f, barPaint)
+            barPaint.color = Color.parseColor("#18FF2A6D")
+            canvas.drawRect(0f, trackingY + 26f, w, trackingY + 34f, barPaint)
+        }
+
+        val radius = hypot(w.toDouble(), h.toDouble()).toFloat() * 0.56f
+        vignettePaint.shader = RadialGradient(
+            w / 2f, h / 2f, radius,
+            intArrayOf(Color.TRANSPARENT, Color.TRANSPARENT, Color.parseColor("#88000000")),
+            floatArrayOf(0f, 0.62f, 1f),
+            Shader.TileMode.CLAMP
+        )
+        canvas.drawRect(0f, 0f, w, h, vignettePaint)
+    }
+
+    override fun onDetachedFromWindow() {
+        super.onDetachedFromWindow()
+        handlerAnim.removeCallbacks(runnable)
+    }
+}
+
+data class LyricLine(val timeMs: Long, val text: String, val endTimeMs: Long = -1L)
+
+object LrcManager {
+    private val timestampRegex = Regex("""\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]""")
+    private val nonOfficialRegex = Regex(
+        """\b(official\s*video|video\s*oficial|videoclip|music\s*video|mv|lyric\s*video|live|en\s*vivo|concert|remix|sped\s*up|nightcore|slowed|reverb|cover|karaoke|instrumental|reaction|teaser|trailer|short|shorts)\b""",
+        RegexOption.IGNORE_CASE
+    )
+
+    fun formatTimestamp(ms: Long): String {
+        if (ms < 0L) return "--:--"
+        val totalSec = ms / 1000L
+        val mins = totalSec / 60L
+        val secs = totalSec % 60L
+        return String.format("%02d:%02d", mins, secs)
+    }
+
+    fun hasSyncedTimestamps(lines: List<LyricLine>): Boolean {
+        return lines.count { it.timeMs >= 0L } >= 2
+    }
+
+    fun recordOriginalTitle(context: Context, songPath: String, originalTitle: String) {
+        val cleanOrig = originalTitle.trim()
+        if (cleanOrig.isEmpty()) return
+        try {
+            val lyricsDir = File(context.getExternalFilesDir(null), "Base-Lyrics").apply { mkdirs() }
+            val f = File(lyricsDir, ".original_titles.json")
+            val json = if (f.exists()) {
+                try { JSONObject(f.readText(Charsets.UTF_8)) } catch (_: Exception) { JSONObject() }
+            } else {
+                JSONObject()
+            }
+            val newFile = File(songPath)
+            val newBase = newFile.nameWithoutExtension.lowercase()
+            val existing = json.optString(newBase).takeIf { it.isNotBlank() }
+            val finalOrig = existing ?: cleanOrig
+            json.put(newBase, finalOrig)
+            json.put(newFile.name.lowercase(), finalOrig)
+            f.writeText(json.toString(), Charsets.UTF_8)
+        } catch (_: Exception) {}
+    }
+
+    fun resolveReferenceTitle(context: Context, songPath: String, displayTitle: String): String {
+        val currentBase = if (!songPath.startsWith("LIVE_STREAM|") && !songPath.startsWith("PENDING_YT|")) {
+            File(songPath).nameWithoutExtension
+        } else {
+            displayTitle
+        }
+        try {
+            val lyricsDir = File(context.getExternalFilesDir(null), "Base-Lyrics")
+            val f = File(lyricsDir, ".original_titles.json")
+            if (f.exists()) {
+                val json = JSONObject(f.readText(Charsets.UTF_8))
+                val saved = json.optString(currentBase.lowercase()).takeIf { it.isNotBlank() }
+                    ?: json.optString(displayTitle.trim().lowercase()).takeIf { it.isNotBlank() }
+                if (!saved.isNullOrBlank()) {
+                    return saved.replace("_", " ").trim()
+                }
+            }
+        } catch (_: Exception) {}
+        return (if (currentBase.isNotBlank()) currentBase else displayTitle).replace("_", " ").trim()
+    }
+
+    fun parseLrc(raw: String): List<LyricLine> {
+        val result = mutableListOf<LyricLine>()
+        val rawLines = raw.lineSequence().map { it.trim() }.filter { it.isNotEmpty() }.toList()
+        if (rawLines.isEmpty()) return emptyList()
+
+        for (line in rawLines) {
+            val matches = timestampRegex.findAll(line).toList()
+            if (matches.isNotEmpty()) {
+                val lyricText = line.replace(timestampRegex, "").trim()
+                if (lyricText.isEmpty()) continue
+                for (m in matches) {
+                    val mins = m.groupValues[1].toLongOrNull() ?: 0L
+                    val secs = m.groupValues[2].toLongOrNull() ?: 0L
+                    val fracStr = m.groupValues[3]
+                    val millis = when (fracStr.length) {
+                        0 -> 0L
+                        1 -> (fracStr.toLongOrNull() ?: 0L) * 100L
+                        2 -> (fracStr.toLongOrNull() ?: 0L) * 10L
+                        else -> fracStr.take(3).toLongOrNull() ?: 0L
+                    }
+                    result.add(LyricLine(mins * 60_000L + secs * 1_000L + millis, lyricText))
+                }
+            }
+        }
+
+        if (result.isEmpty()) return emptyList()
+        val sorted = result.sortedBy { it.timeMs }
+        return sorted.mapIndexed { idx, item ->
+            val nextStart = sorted.getOrNull(idx + 1)?.timeMs ?: (item.timeMs + 4000L)
+            item.copy(endTimeMs = nextStart.coerceAtLeast(item.timeMs + 600L))
+        }
+    }
+
+    fun toLrcText(lines: List<LyricLine>): String {
+        return lines.filter { it.timeMs >= 0L }.joinToString("\n") { line ->
+            val mins = line.timeMs / 60_000L
+            val secs = (line.timeMs % 60_000L) / 1000L
+            val centis = (line.timeMs % 1000L) / 10L
+            String.format("[%02d:%02d.%02d] %s", mins, secs, centis, line.text)
+        }
+    }
+
+    fun findActiveLineIndex(lines: List<LyricLine>, positionMs: Long): Int {
+        if (!hasSyncedTimestamps(lines)) return -1
+        var active = -1
+        for (i in lines.indices) {
+            val t = lines[i].timeMs
+            if (t >= 0L && t <= positionMs + 100L) {
+                active = i
+            } else if (t > positionMs + 100L) {
+                break
+            }
+        }
+        return active
+    }
+
+
+    private fun offsetKeyFor(songPath: String, displayTitle: String): String {
+        val base = if (!songPath.startsWith("LIVE_STREAM|") && !songPath.startsWith("PENDING_YT|")) {
+            File(songPath).nameWithoutExtension
+        } else {
+            displayTitle
+        }
+        return base.trim().lowercase().ifEmpty { "default_track" }
+    }
+
+    fun getOffsetMs(context: Context, songPath: String, displayTitle: String): Long {
+        return try {
+            val lyricsDir = File(context.getExternalFilesDir(null), "Base-Lyrics").apply { mkdirs() }
+            val f = File(lyricsDir, ".offsets.json")
+            if (!f.exists()) return 0L
+            val json = JSONObject(f.readText(Charsets.UTF_8))
+            json.optLong(offsetKeyFor(songPath, displayTitle), 0L)
+        } catch (_: Exception) {
+            0L
+        }
+    }
+
+    fun setOffsetMs(context: Context, songPath: String, displayTitle: String, offsetMs: Long) {
+        try {
+            val lyricsDir = File(context.getExternalFilesDir(null), "Base-Lyrics").apply { mkdirs() }
+            val f = File(lyricsDir, ".offsets.json")
+            val json = if (f.exists()) {
+                try { JSONObject(f.readText(Charsets.UTF_8)) } catch (_: Exception) { JSONObject() }
+            } else {
+                JSONObject()
+            }
+            json.put(offsetKeyFor(songPath, displayTitle), offsetMs)
+            f.writeText(json.toString(), Charsets.UTF_8)
+        } catch (_: Exception) {}
+    }
+
+    fun saveVideoSourceForSong(context: Context, songPath: String, displayTitle: String, videoUrl: String) {
+        val cleanUrl = videoUrl.trim()
+        if (cleanUrl.isBlank()) return
+        try {
+            val lyricsDir = File(context.getExternalFilesDir(null), "Base-Lyrics").apply { mkdirs() }
+            val mapFile = File(lyricsDir, ".sources.json")
+            val json = if (mapFile.exists()) {
+                try { JSONObject(mapFile.readText(Charsets.UTF_8)) } catch (_: Exception) { JSONObject() }
+            } else {
+                JSONObject()
+            }
+            if (!songPath.startsWith("LIVE_STREAM|") && !songPath.startsWith("PENDING_YT|")) {
+                val f = File(songPath)
+                json.put(f.name, cleanUrl)
+                json.put(f.nameWithoutExtension.lowercase(), cleanUrl)
+            }
+            if (displayTitle.isNotBlank()) {
+                json.put(displayTitle.trim().lowercase(), cleanUrl)
+            }
+            mapFile.writeText(json.toString(), Charsets.UTF_8)
+        } catch (_: Exception) {}
+    }
+
+    fun resolveVideoUrlForSong(context: Context, songPath: String, displayTitle: String): String? {
+        val ytIdRegex = Regex("""(?:youtube\.com/(?:watch\?v=|shorts/|embed/|v/)|youtu\.be/)([a-zA-Z0-9_-]{11})""")
+        ytIdRegex.find(songPath)?.let { return "https://www.youtube.com/watch?v=${it.groupValues[1]}" }
+        try {
+            val lyricsDir = File(context.getExternalFilesDir(null), "Base-Lyrics")
+            val mapFile = File(lyricsDir, ".sources.json")
+            if (mapFile.exists()) {
+                val json = JSONObject(mapFile.readText(Charsets.UTF_8))
+                val base = if (!songPath.startsWith("LIVE_STREAM|") && !songPath.startsWith("PENDING_YT|")) {
+                    File(songPath).nameWithoutExtension
+                } else {
+                    displayTitle
+                }
+                for (k in listOf(base, base.lowercase(), displayTitle.trim(), displayTitle.trim().lowercase())) {
+                    val v = json.optString(k)
+                    if (v.isNotBlank() && ytIdRegex.containsMatchIn(v)) return v
+                }
+            }
+        } catch (_: Exception) {}
+        return null
+    }
+
+    fun saveCustomLrcForTrack(context: Context, songPath: String, displayTitle: String, rawContent: String): List<LyricLine> {
+        val ref = resolveReferenceTitle(context, songPath, displayTitle)
+        if (isNonOfficialCandidate(ref)) return emptyList()
+        val lyricsDir = File(context.getExternalFilesDir(null), "Base-Lyrics").apply { mkdirs() }
+        val safeBaseName = if (songPath.startsWith("LIVE_STREAM|") || songPath.startsWith("PENDING_YT|")) {
+            ref.replace(Regex("""[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ _-]"""), "").trim().ifEmpty { "stream_track" }
+        } else {
+            File(songPath).nameWithoutExtension
+        }
+        val parsed = parseLrc(rawContent)
+        if (!hasSyncedTimestamps(parsed)) return emptyList()
+        val outFile = File(lyricsDir, "$safeBaseName.lrc")
+        outFile.writeText(toLrcText(parsed), Charsets.UTF_8)
+        return parsed
+    }
+
+    fun searchSyncedLyricsByQuery(context: Context, songPath: String, displayTitle: String, customQuery: String): List<LyricLine> {
+        val q = customQuery.trim()
+        if (q.isEmpty() || isNonOfficialCandidate(q)) return emptyList()
+        try {
+            val searchUrl = "https://lrclib.net/api/search?q=" + java.net.URLEncoder.encode(q, "UTF-8")
+            val searchJson = httpGet(searchUrl)
+            if (searchJson != null) {
+                val arr = JSONArray(searchJson)
+                for (i in 0 until arr.length()) {
+                    val item = arr.getJSONObject(i)
+                    val cand = "${item.optString("artistName")} ${item.optString("trackName")} ${item.optString("albumName")}"
+                    if (isNonOfficialCandidate(cand)) continue
+                    val synced = item.optString("syncedLyrics")
+                    if (synced.isNotBlank() && synced != "null") {
+                        val parsed = parseLrc(synced)
+                        if (hasSyncedTimestamps(parsed)) {
+                            saveCustomLrcForTrack(context, songPath, displayTitle, synced)
+                            return parsed
+                        }
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+        return emptyList()
+    }
+
+    private fun isNonOfficialCandidate(text: String): Boolean {
+        return nonOfficialRegex.containsMatchIn(text)
+    }
+
+    private fun cleanOfficialQueryParts(rawTitle: String): Pair<String, String> {
+        val cleaned = rawTitle
+            .replace(Regex("""\s*[-–_]\s*(Topic|Official\s*Audio|Audio\s*Oficial|Oficial|Official|Music|Records|Entertainment|Channel|TV|HD|4K|Audio)(\s|$)""", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("""\(.*?\)"""), "")
+            .replace(Regex("""\[.*?\]"""), "")
+            .replace("_", " ")
+            .replace(Regex("""\s{2,}"""), " ")
+            .trim()
+
+        val sepIdx = cleaned.indexOf(" - ")
+        return if (sepIdx > 0) {
+            val artist = cleaned.substring(0, sepIdx).trim()
+            val track = cleaned.substring(sepIdx + 3).trim()
+            Pair(artist, track)
+        } else {
+            Pair("", cleaned)
+        }
+    }
+
+    fun fetchOrLoadLyrics(context: Context, songPath: String, displayTitle: String, forceRefresh: Boolean = false): List<LyricLine> {
+        val referenceTitle = resolveReferenceTitle(context, songPath, displayTitle)
+        if (isNonOfficialCandidate(referenceTitle)) {
+            return emptyList()
+        }
+
+        val lyricsDir = File(context.getExternalFilesDir(null), "Base-Lyrics").apply { mkdirs() }
+        val safeBaseName = if (songPath.startsWith("LIVE_STREAM|") || songPath.startsWith("PENDING_YT|")) {
+            referenceTitle.replace(Regex("""[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ _-]"""), "").trim().ifEmpty { "stream_track" }
+        } else {
+            File(songPath).nameWithoutExtension
+        }
+
+        val sidecarLrc = if (!songPath.startsWith("LIVE_STREAM|") && !songPath.startsWith("PENDING_YT|")) {
+            File(File(songPath).parentFile, "$safeBaseName.lrc")
+        } else null
+        val cachedLrc = File(lyricsDir, "$safeBaseName.lrc")
+
+        if (!forceRefresh) {
+            if (sidecarLrc != null && sidecarLrc.exists() && sidecarLrc.length() > 0L) {
+                val parsed = parseLrc(sidecarLrc.readText(Charsets.UTF_8))
+                if (hasSyncedTimestamps(parsed)) return parsed
+            }
+            if (cachedLrc.exists() && cachedLrc.length() > 0L) {
+                val parsed = parseLrc(cachedLrc.readText(Charsets.UTF_8))
+                if (hasSyncedTimestamps(parsed)) return parsed
+            }
+        }
+
+        val (artist, track) = cleanOfficialQueryParts(referenceTitle)
+        if (track.isBlank()) return emptyList()
+
+        try {
+            if (artist.isNotBlank()) {
+                val directUrl = "https://lrclib.net/api/get?track_name=" +
+                    URLEncoder.encode(track, "UTF-8") +
+                    "&artist_name=" + URLEncoder.encode(artist, "UTF-8")
+                val directJson = httpGet(directUrl)
+                if (directJson != null) {
+                    val obj = JSONObject(directJson)
+                    val trackName = obj.optString("trackName")
+                    val artistName = obj.optString("artistName")
+                    val albumName = obj.optString("albumName")
+                    if (!isNonOfficialCandidate("$artistName $trackName $albumName")) {
+                        val synced = obj.optString("syncedLyrics").takeIf { it.isNotBlank() && it != "null" }
+                        if (!synced.isNullOrBlank()) {
+                            val parsed = parseLrc(synced)
+                            if (hasSyncedTimestamps(parsed)) {
+                                cachedLrc.writeText(synced, Charsets.UTF_8)
+                                return parsed
+                            }
+                        }
+                    }
+                }
+            }
+
+            val q = if (artist.isNotBlank()) "$artist $track" else track
+            val searchUrl = "https://lrclib.net/api/search?q=" + URLEncoder.encode(q, "UTF-8")
+            val searchJson = httpGet(searchUrl)
+            if (searchJson != null) {
+                val arr = JSONArray(searchJson)
+                for (i in 0 until arr.length()) {
+                    val item = arr.getJSONObject(i)
+                    val candTitle = item.optString("trackName")
+                    val candArtist = item.optString("artistName")
+                    val candAlbum = item.optString("albumName")
+                    if (isNonOfficialCandidate("$candArtist $candTitle $candAlbum")) continue
+
+                    val synced = item.optString("syncedLyrics")
+                    if (synced.isNotBlank() && synced != "null") {
+                        val parsed = parseLrc(synced)
+                        if (hasSyncedTimestamps(parsed)) {
+                            cachedLrc.writeText(synced, Charsets.UTF_8)
+                            return parsed
+                        }
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+
+        return emptyList()
+    }
+
+    private fun httpGet(urlStr: String): String? {
+        return try {
+            val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 6500
+                readTimeout = 6500
+                setRequestProperty("User-Agent", "RellyFi-Android/1.0")
+                doInput = true
+                connect()
+            }
+            val code = conn.responseCode
+            val body = if (code == 200) conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() } else null
+            conn.disconnect()
+            body
+        } catch (_: Exception) {
+            null
+        }
+    }
+}
+
+class KaraokeLineView(context: Context) : LinearLayout(context) {
+    var progressRatio: Float = 0f
+        set(value) {
+            val clamped = value.coerceIn(0f, 1f)
+            if (kotlin.math.abs(field - clamped) > 0.01f) {
+                field = clamped
+                invalidate()
+            }
+        }
+    var isCurrentLine: Boolean = false
+        set(value) {
+            if (field != value) {
+                field = value
+                invalidate()
+            }
+        }
+    var sweepColor: Int = Color.parseColor("#66FFFFFF")
+
+    val txtTime: TextView
+    val txtLyric: TextView
+
+    private val basePillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val sweepPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 2.5f
+    }
+    private val pillRect = RectF()
+    private val clipRounded = Path()
+
+    init {
+        orientation = HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(22, 14, 22, 14)
+        setWillNotDraw(false)
+        isClickable = true
+        isFocusable = true
+
+        txtTime = TextView(context).apply {
+            textSize = 11f
+            typeface = Typeface.MONOSPACE
+            alpha = 0.65f
+            setPadding(0, 0, 18, 0)
+            layoutParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT)
+        }
+        txtLyric = TextView(context).apply {
+            textSize = 14.5f
+            gravity = Gravity.START or Gravity.CENTER_VERTICAL
+            layoutParams = LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f)
+        }
+        addView(txtTime)
+        addView(txtLyric)
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        if (isCurrentLine && width > 0 && height > 0) {
+            pillRect.set(2f, 2f, width - 2f, height - 2f)
+            clipRounded.reset()
+            clipRounded.addRoundRect(pillRect, 24f, 24f, Path.Direction.CW)
+
+            basePillPaint.color = Color.parseColor("#2A000000")
+            canvas.drawRoundRect(pillRect, 24f, 24f, basePillPaint)
+
+            canvas.save()
+            canvas.clipPath(clipRounded)
+            sweepPaint.color = sweepColor
+            canvas.drawRect(0f, 0f, width * progressRatio, height.toFloat(), sweepPaint)
+            canvas.restore()
+
+            borderPaint.color = Color.parseColor("#AAFFFFFF")
+            canvas.drawRoundRect(pillRect, 24f, 24f, borderPaint)
+        }
+        super.onDraw(canvas)
+    }
+}
+
 class MainActivity : AppCompatActivity() {
     private lateinit var prefs: SharedPreferences
     private lateinit var currentTheme: ThemeColors
@@ -352,10 +1174,25 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvContainer: FrameLayout
     private lateinit var tvTextureView: TextureView
     private lateinit var tvStaticView: TvStaticView
+    private lateinit var tvCrtOverlay: CrtOverlayView
+    private lateinit var txtTvSubtitle: TextView
+    private lateinit var tvFloatingHud: FrameLayout
+    private lateinit var btnTvFilter: Button
+    private lateinit var btnTvLyricsToggle: Button
+    private lateinit var btnTvFullscreen: Button
+    private lateinit var tvFsTransportRow: LinearLayout
+    private lateinit var btnTvFsPlayPause: ImageButton
     private lateinit var tvOverlayLayout: LinearLayout
     private lateinit var txtTvStatus: TextView
     private lateinit var btnDownloadClip: Button
     private lateinit var txtTvBadge: TextView
+
+    private lateinit var lyricsCardContainer: LinearLayout
+    private lateinit var txtLyricsHeader: TextView
+    private lateinit var btnToggleLyricsExpand: Button
+    private lateinit var btnReloadLyrics: Button
+    private lateinit var lyricsScrollView: ScrollView
+    private lateinit var lyricsLinesContainer: LinearLayout
     private lateinit var txtTitle: TextView
     private lateinit var txtArtist: TextView
     private lateinit var wavySeekBar: WavySeekBar
@@ -378,6 +1215,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var btnBackFolder: Button
     private lateinit var btnSelectMode: Button
     private lateinit var btnDeleteSelected: ImageButton
+    private lateinit var selectionActionsScroll: HorizontalScrollView
+    private lateinit var selectionActionsBar: LinearLayout
+    private lateinit var btnSelectAll: Button
+    private lateinit var btnAddSelectedToPlaylist: Button
+    private lateinit var btnRenameSelected: Button
     private lateinit var btnCrearPlaylist: Button
     private lateinit var txtQueueHeader: TextView
     private lateinit var txtSearchHeader: TextView
@@ -407,6 +1249,30 @@ class MainActivity : AppCompatActivity() {
     private var videoSurface: Surface? = null
     private var isTvMode: Boolean = false
     private var isVideoPrepared: Boolean = false
+    private var isTvFullscreen: Boolean = false
+    private var isTvLyricsEnabled: Boolean = true
+    private var isLyricsExpanded: Boolean = false
+    private var tvFullscreenHost: FrameLayout? = null
+    private var tvOriginalLp: ViewGroup.LayoutParams? = null
+    private var tvOriginalIndex: Int = 1
+    private val tvHudHideRunnable = Runnable {
+        if (::tvFloatingHud.isInitialized) {
+            tvFloatingHud.animate().alpha(0f).setDuration(240L).withEndAction {
+                tvFloatingHud.visibility = View.GONE
+                tvFloatingHud.alpha = 1f
+            }.start()
+        }
+    }
+
+    private var audioVisualizer: Visualizer? = null
+    private var simBeatPhase: Float = 0f
+
+    private var currentLyrics: List<LyricLine> = emptyList()
+    private var activeLyricIndex: Int = -1
+    private var currentLyricOffsetMs: Long = 0L
+    private var lyricsFetchJob: kotlinx.coroutines.Job? = null
+    private var isVideoSeeking: Boolean = false
+    private var lastVideoSeekRealtimeMs: Long = 0L
     private var videoStreamJob: kotlinx.coroutines.Job? = null
     private data class CachedStream(val audioUrl: String?, val videoUrl: String?, val timestampMs: Long)
     private val streamCache = java.util.concurrent.ConcurrentHashMap<String, CachedStream>()
@@ -450,6 +1316,7 @@ class MainActivity : AppCompatActivity() {
                 releaseVideoPlayer()
             }
 
+            loadLyricsForTrack(songPath, title)
             viewModel.triggerFypForSong(songPath, title)
             if (::queueAdapter.isInitialized) queueAdapter.notifyDataSetChanged()
         }
@@ -457,15 +1324,19 @@ class MainActivity : AppCompatActivity() {
         override fun onPlaybackStateChanged(isPlaying: Boolean) {
             if (isPlaying) {
                 btnPlayPause.setImageResource(android.R.drawable.ic_media_pause)
+                if (::btnTvFsPlayPause.isInitialized) btnTvFsPlayPause.setImageResource(android.R.drawable.ic_media_pause)
                 wavySeekBar.isWaving = true
                 imgVinyl.isSpinning = true
+                startAudioVisualizer()
                 if (isTvMode && isVideoPrepared) {
                     try { videoMediaPlayer?.let { vp -> if (!vp.isPlaying) vp.start() } } catch (_: Exception) {}
                 }
             } else {
                 btnPlayPause.setImageResource(android.R.drawable.ic_media_play)
+                if (::btnTvFsPlayPause.isInitialized) btnTvFsPlayPause.setImageResource(android.R.drawable.ic_media_play)
                 wavySeekBar.isWaving = false
                 imgVinyl.isSpinning = false
+                stopAudioVisualizer()
                 if (isVideoPrepared) {
                     try { videoMediaPlayer?.pause() } catch (_: Exception) {}
                 }
@@ -516,6 +1387,18 @@ class MainActivity : AppCompatActivity() {
                 srv.isCrossfadeEnabled = isCrossfadeEnabled
                 srv.isLooping = isLooping
                 srv.setPlaybackListener(playbackListener)
+
+                if (pendingPlayRequest) {
+                    pendingPlayRequest = false
+                    reproducirCancionActual()
+                } else if (srv.playlist.isNotEmpty()) {
+                    playlistActual = srv.playlist
+                    nombrePlaylistActual = srv.playlistName
+                    if (::queueAdapter.isInitialized) queueAdapter.updateList(playlistActual)
+                    playbackListener.onPlaybackStateChanged(srv.isPlaying())
+                    val dur = srv.getDuration()
+                    if (dur > 0) playbackListener.onDurationReady(dur)
+                }
             }
         }
 
@@ -538,7 +1421,26 @@ class MainActivity : AppCompatActivity() {
         
         viewModel = ViewModelProvider(this)[MainViewModel::class.java]
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) { if (checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1) }
+        val permsToRequest = mutableListOf<String>()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            permsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            permsToRequest.add(Manifest.permission.RECORD_AUDIO)
+        }
+        if (permsToRequest.isNotEmpty()) {
+            requestPermissions(permsToRequest.toTypedArray(), 1)
+        }
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                if (isTvFullscreen) {
+                    exitTvFullscreen()
+                } else {
+                    isEnabled = false
+                    onBackPressedDispatcher.onBackPressed()
+                }
+            }
+        })
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) { window.setDecorFitsSystemWindows(false) } 
         else { window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_LAYOUT_STABLE or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION }
         window.statusBarColor = Color.TRANSPARENT; window.navigationBarColor = Color.TRANSPARENT
@@ -620,10 +1522,12 @@ class MainActivity : AppCompatActivity() {
                 mapPlaylists = tempMap
                 renderizarListaDeCarpetas()
                 if (playlistActual.isEmpty() && mapPlaylists.isNotEmpty()) {
-                    val primera = mapPlaylists.keys.first()
-                    nombrePlaylistActual = primera
-                    playlistActual = mapPlaylists[primera]?.toMutableList() ?: mutableListOf()
-                    if(::queueAdapter.isInitialized) queueAdapter.updateList(playlistActual)
+                    val inicial = mapPlaylists.entries.firstOrNull { it.value.isNotEmpty() }
+                        ?: mapPlaylists.entries.first()
+                    nombrePlaylistActual = inicial.key
+                    playlistActual = inicial.value.toMutableList()
+                    currentIndex = 0
+                    if (::queueAdapter.isInitialized) queueAdapter.updateList(playlistActual)
                 }
             }
         }
@@ -758,8 +1662,10 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
-            aplicarMargenBarraNavegacionInferior()
-}
+        aplicarMargenBarraNavegacionInferior()
+        UpdateChecker.verificarActualizacion(this)
+        solicitarExencionBateria()
+    }
 
     private fun getGlassDrawable(isDark: Boolean): GradientDrawable { val glassColor = if (isDark) Color.parseColor("#4D000000") else Color.parseColor("#66FFFFFF"); val strokeColor = if (isDark) Color.parseColor("#33FFFFFF") else Color.parseColor("#33000000"); return GradientDrawable().apply { setColor(glassColor); cornerRadius = 30f; setStroke(2, strokeColor) } }
 
@@ -852,6 +1758,15 @@ class MainActivity : AppCompatActivity() {
         }
 
         btnFavRadial.themeColors = t
+        imgVinyl.pulseColor = t.accent
+        imgVinyl.secondaryPulseColor = t.w2c1
+        if (::lyricsCardContainer.isInitialized) {
+            lyricsCardContainer.background = getGlassDrawable(t.isDark)
+            txtLyricsHeader.applyContrastingText(t.isDark)
+            btnToggleLyricsExpand.applyContrastingText(t.isDark)
+            btnReloadLyrics.applyContrastingText(t.isDark)
+            refreshLyricsHighlight(forceScroll = false)
+        }
     }
 
     private fun updateUIColors(t: ThemeColors) {
@@ -880,6 +1795,12 @@ class MainActivity : AppCompatActivity() {
         searchInput.applyContrastingInput(t.isDark); searchInput.background = getGlassDrawable(t.isDark)
         txtFoldersHeader.applyContrastingText(t.isDark); txtFolderTitle.applyContrastingText(t.isDark)
         btnBackFolder.applyContrastingText(t.isDark); btnSelectMode.applyContrastingText(t.isDark); btnDeleteSelected.setColorFilter(if (t.isDark) Color.WHITE else Color.BLACK)
+        if (::btnSelectAll.isInitialized) {
+            btnSelectAll.applyContrastingText(t.isDark); btnSelectAll.background = getGlassDrawable(t.isDark)
+            btnAddSelectedToPlaylist.applyContrastingText(t.isDark); btnAddSelectedToPlaylist.background = getGlassDrawable(t.isDark)
+            btnRenameSelected.applyContrastingText(t.isDark); btnRenameSelected.background = getGlassDrawable(t.isDark)
+            btnDeleteSelected.background = getGlassDrawable(t.isDark)
+        }
         txtQueueHeader.applyContrastingText(t.isDark)
         txtSearchHeader.applyContrastingText(t.isDark)
         inputYtSearch.applyContrastingInput(t.isDark); inputYtSearch.background = getGlassDrawable(t.isDark)
@@ -1127,7 +2048,7 @@ class MainActivity : AppCompatActivity() {
             }
             clipToOutline = true
             outlineProvider = ViewOutlineProvider.BACKGROUND
-            setOnClickListener { toggleVinylTvMode() }
+            setOnClickListener { showTvHudTemporarily() }
         }
 
         tvTextureView = TextureView(this).apply {
@@ -1164,6 +2085,33 @@ class MainActivity : AppCompatActivity() {
         tvStaticView = TvStaticView(this).apply {
             layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
             visibility = View.GONE
+        }
+
+        tvCrtOverlay = CrtOverlayView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+            visibility = View.GONE
+        }
+
+        txtTvSubtitle = TextView(this).apply {
+            text = ""
+            textSize = 14f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE)
+            setShadowLayer(6f, 0f, 0f, Color.BLACK)
+            gravity = Gravity.CENTER
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(24, 10, 24, 10)
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#99000000"))
+                cornerRadius = 24f
+            }
+            visibility = View.GONE
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            ).apply { setMargins(28, 0, 28, 24) }
         }
 
         tvOverlayLayout = LinearLayout(this).apply {
@@ -1203,27 +2151,136 @@ class MainActivity : AppCompatActivity() {
         tvOverlayLayout.addView(txtTvStatus)
         tvOverlayLayout.addView(btnDownloadClip)
 
+        tvFloatingHud = FrameLayout(this).apply {
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+            visibility = View.VISIBLE
+        }
+
+        val hudTopBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.TOP
+            ).apply { setMargins(16, 16, 16, 0) }
+        }
+
+        btnTvFilter = Button(this).apply {
+            text = "FILTRO: OFF"
+            textSize = 10f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE)
+            minHeight = 0; minimumHeight = 0; minWidth = 0; minimumWidth = 0
+            setPadding(20, 10, 20, 10)
+            background = GradientDrawable().apply { setColor(Color.parseColor("#AA000000")); cornerRadius = 24f }
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 10, 0) }
+            setOnClickListener {
+                val m = tvCrtOverlay.cycleMode()
+                text = m.label
+                showTvHudTemporarily()
+            }
+        }
+
+        btnTvLyricsToggle = Button(this).apply {
+            text = "LETRA: ON"
+            textSize = 10f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE)
+            minHeight = 0; minimumHeight = 0; minWidth = 0; minimumWidth = 0
+            setPadding(20, 10, 20, 10)
+            background = GradientDrawable().apply { setColor(Color.parseColor("#AA000000")); cornerRadius = 24f }
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 10, 0) }
+            setOnClickListener {
+                isTvLyricsEnabled = !isTvLyricsEnabled
+                text = if (isTvLyricsEnabled) "LETRA: ON" else "LETRA: OFF"
+                updateTvSubtitleVisibility()
+                showTvHudTemporarily()
+            }
+        }
+
+        val hudSpacer = View(this).apply { layoutParams = LinearLayout.LayoutParams(0, 1, 1f) }
+
         txtTvBadge = TextView(this).apply {
-            text = "TV • TOCA PARA VINILO"
+            text = "VINILO"
             textSize = 10f
             typeface = Typeface.DEFAULT_BOLD
             setTextColor(Color.WHITE)
             setPadding(22, 10, 22, 10)
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor("#88000000"))
-                cornerRadius = 24f
+            background = GradientDrawable().apply { setColor(Color.parseColor("#AA000000")); cornerRadius = 24f }
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 10, 0) }
+            setOnClickListener {
+                if (isTvFullscreen) exitTvFullscreen()
+                toggleVinylTvMode()
             }
+        }
+
+        btnTvFullscreen = Button(this).apply {
+            text = "⛶"
+            textSize = 13f
+            typeface = Typeface.DEFAULT_BOLD
+            setTextColor(Color.WHITE)
+            minHeight = 0; minimumHeight = 0; minWidth = 0; minimumWidth = 0
+            setPadding(22, 8, 22, 8)
+            background = GradientDrawable().apply { setColor(Color.parseColor("#AA000000")); cornerRadius = 24f }
+            setOnClickListener {
+                toggleTvFullscreen()
+                showTvHudTemporarily()
+            }
+        }
+
+        hudTopBar.addView(btnTvFilter)
+        hudTopBar.addView(btnTvLyricsToggle)
+        hudTopBar.addView(hudSpacer)
+        hudTopBar.addView(txtTvBadge)
+        hudTopBar.addView(btnTvFullscreen)
+
+        tvFsTransportRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            visibility = View.GONE
+            setPadding(28, 12, 28, 12)
+            background = GradientDrawable().apply { setColor(Color.parseColor("#AA000000")); cornerRadius = 40f }
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.WRAP_CONTENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT,
-                Gravity.TOP or Gravity.END
-            ).apply { setMargins(0, 18, 18, 0) }
+                Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            ).apply { setMargins(0, 0, 0, 22) }
         }
+        val btnFsPrev = ImageButton(this).apply {
+            setImageResource(android.R.drawable.ic_media_previous)
+            setColorFilter(Color.WHITE)
+            background = null
+            setPadding(24, 10, 24, 10)
+            setOnClickListener { reproducirAnterior(); showTvHudTemporarily() }
+        }
+        btnTvFsPlayPause = ImageButton(this).apply {
+            setImageResource(android.R.drawable.ic_media_pause)
+            setColorFilter(Color.WHITE)
+            background = null
+            setPadding(30, 10, 30, 10)
+            setOnClickListener { togglePlayPause(); showTvHudTemporarily() }
+        }
+        val btnFsNext = ImageButton(this).apply {
+            setImageResource(android.R.drawable.ic_media_next)
+            setColorFilter(Color.WHITE)
+            background = null
+            setPadding(24, 10, 24, 10)
+            setOnClickListener { reproducirSiguiente(); showTvHudTemporarily() }
+        }
+        tvFsTransportRow.addView(btnFsPrev)
+        tvFsTransportRow.addView(btnTvFsPlayPause)
+        tvFsTransportRow.addView(btnFsNext)
+
+        tvFloatingHud.addView(hudTopBar)
+        tvFloatingHud.addView(tvFsTransportRow)
 
         tvContainer.addView(tvTextureView)
         tvContainer.addView(tvStaticView)
+        tvContainer.addView(tvCrtOverlay)
+        tvContainer.addView(txtTvSubtitle)
         tvContainer.addView(tvOverlayLayout)
-        tvContainer.addView(txtTvBadge)
+        tvContainer.addView(tvFloatingHud)
 
         mediaStageContainer.addView(imgVinyl)
         mediaStageContainer.addView(tvContainer)
@@ -1239,11 +2296,9 @@ class MainActivity : AppCompatActivity() {
                     val targetMs = (prog * dur).toInt()
                     musicService?.seekTo(targetMs)
                     if (isVideoPrepared) {
-                        try {
-                            videoMediaPlayer?.let { vp ->
-                                if (vp.duration > 0) vp.seekTo(targetMs.coerceAtMost(vp.duration))
-                            }
-                        } catch (_: Exception) {}
+                        videoMediaPlayer?.let { vp ->
+                            seekVideoSafely(vp, targetMs, startAfterSeek = false)
+                        }
                     }
                 }
             }
@@ -1259,7 +2314,67 @@ class MainActivity : AppCompatActivity() {
         controlsRow1.addView(btnPrev); controlsRow1.addView(btnPlayPause); controlsRow1.addView(btnNext)
 
         val controlsRow2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; setPadding(0, 5, 0, 10) }
-        btnShuffle = Button(this).apply { text = "MEZCLAR"; textSize = 11f; setBackgroundColor(Color.TRANSPARENT); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f); setOnClickListener { if (playlistActual.isNotEmpty()) { resetLoopState(); musicService?.shuffleQueue() ?: run { musicService?.shuffleQueue() ?: run { playlistActual.shuffle(); currentIndex = 0; reproducirCancionActual() } }; val pulse = ValueAnimator.ofArgb(currentTheme.accentLight, Color.TRANSPARENT); pulse.duration = 400; pulse.addUpdateListener { btnShuffle.setBackgroundColor(it.animatedValue as Int) }; pulse.start() } } }
+        btnShuffle = Button(this).apply {
+            text = "ALEATORIO"
+            isAllCaps = true
+            textSize = 11f
+            setBackgroundColor(Color.TRANSPARENT)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            setOnClickListener {
+                if (playlistActual.size > 1) {
+                    resetLoopState()
+                    if (musicService != null) {
+                        musicService?.shuffleQueue()
+                    } else if (currentIndex in playlistActual.indices) {
+                        val actual = playlistActual[currentIndex]
+                        val resto = playlistActual.filterIndexed { idx, _ -> idx != currentIndex }.shuffled()
+                        playlistActual.clear()
+                        playlistActual.add(actual)
+                        playlistActual.addAll(resto)
+                        currentIndex = 0
+                    }
+                }
+
+                val glowColor = ColorUtils.blendARGB(currentTheme.accent, Color.WHITE, 0.35f)
+                val pulseDrawable = GradientDrawable().apply {
+                    shape = GradientDrawable.RECTANGLE
+                    cornerRadius = 40f
+                    setColor(ColorUtils.setAlphaComponent(glowColor, 175))
+                    setStroke(3, ColorUtils.setAlphaComponent(Color.WHITE, 210))
+                }
+                btnShuffle.background = pulseDrawable
+                btnShuffle.setShadowLayer(14f, 0f, 0f, glowColor)
+                btnShuffle.animate()
+                    .scaleX(1.08f)
+                    .scaleY(1.08f)
+                    .setDuration(140L)
+                    .withEndAction {
+                        btnShuffle.animate()
+                            .scaleX(1.0f)
+                            .scaleY(1.0f)
+                            .setDuration(260L)
+                            .start()
+                    }
+                    .start()
+
+                ValueAnimator.ofFloat(1f, 0f).apply {
+                    duration = 480L
+                    addUpdateListener { anim ->
+                        val f = anim.animatedValue as Float
+                        pulseDrawable.setColor(ColorUtils.setAlphaComponent(glowColor, (175 * f).toInt()))
+                        pulseDrawable.setStroke(3, ColorUtils.setAlphaComponent(Color.WHITE, (210 * f).toInt()))
+                        btnShuffle.invalidate()
+                    }
+                    addListener(object : android.animation.AnimatorListenerAdapter() {
+                        override fun onAnimationEnd(animation: android.animation.Animator) {
+                            btnShuffle.setBackgroundColor(Color.TRANSPARENT)
+                            btnShuffle.applyContrastingText(currentTheme.isDark)
+                        }
+                    })
+                    start()
+                }
+            }
+        }
         btnFavRadial = RadialLikeButton(this).apply { layoutParams = LinearLayout.LayoutParams(0, 120, 1f).apply { setMargins(10,0,10,0) }; onClickAction = { toggleFavCurrentSong() } }
         val wrapLoop = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER; layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
         btnLoop = Button(this).apply { text = "REPETIR"; textSize = 11f; setBackgroundColor(Color.TRANSPARENT); setPadding(0,0,0,0) }
@@ -1270,6 +2385,99 @@ class MainActivity : AppCompatActivity() {
         controlsRow2.addView(btnShuffle); controlsRow2.addView(btnFavRadial); controlsRow2.addView(wrapLoop)
         
         homeContent.addView(txtTitle); homeContent.addView(txtArtist); homeContent.addView(wavySeekBar); homeContent.addView(timeLayout); homeContent.addView(controlsRow1); homeContent.addView(controlsRow2)
+
+        lyricsCardContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(30, 24, 30, 24)
+            background = getGlassDrawable(currentTheme.isDark)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, 24, 0, 0) }
+        }
+
+        val lyricsHeaderRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, 12)
+        }
+        txtLyricsHeader = TextView(this).apply {
+            text = "LETRA SINCRONIZADA"
+            textSize = 12f
+            typeface = Typeface.DEFAULT_BOLD
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        }
+        btnReloadLyrics = Button(this).apply {
+            text = "↻"
+            textSize = 13f
+            setBackgroundColor(Color.TRANSPARENT)
+            minHeight = 0; minimumHeight = 0; minWidth = 0; minimumWidth = 0
+            setPadding(16, 4, 16, 4)
+            setOnClickListener {
+                val path = playlistActual.getOrNull(currentIndex) ?: return@setOnClickListener
+                loadLyricsForTrack(path, txtTitle.text.toString(), forceRefresh = true)
+            }
+        }
+        btnToggleLyricsExpand = Button(this).apply {
+            text = "Expandir"
+            isAllCaps = false
+            textSize = 11f
+            setBackgroundColor(Color.TRANSPARENT)
+            minHeight = 0; minimumHeight = 0; minWidth = 0; minimumWidth = 0
+            setPadding(16, 4, 8, 4)
+            setOnClickListener {
+                isLyricsExpanded = !isLyricsExpanded
+                text = if (isLyricsExpanded) "Compacto" else "Expandir"
+                lyricsScrollView.layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    if (isLyricsExpanded) 460 else 210
+                )
+                refreshLyricsHighlight(forceScroll = true)
+            }
+        }
+        val btnOffsetMinus = Button(this).apply {
+            text = "-0.5s"
+            isAllCaps = false
+            textSize = 10f
+            setBackgroundColor(Color.TRANSPARENT)
+            minHeight = 0; minimumHeight = 0; minWidth = 0; minimumWidth = 0
+            setPadding(10, 4, 10, 4)
+            setOnClickListener { adjustLyricOffset(-500L) }
+        }
+        val btnOffsetPlus = Button(this).apply {
+            text = "+0.5s"
+            isAllCaps = false
+            textSize = 10f
+            setBackgroundColor(Color.TRANSPARENT)
+            minHeight = 0; minimumHeight = 0; minWidth = 0; minimumWidth = 0
+            setPadding(10, 4, 10, 4)
+            setOnClickListener { adjustLyricOffset(500L) }
+        }
+        lyricsHeaderRow.addView(txtLyricsHeader)
+        lyricsHeaderRow.addView(btnOffsetMinus)
+        lyricsHeaderRow.addView(btnOffsetPlus)
+        lyricsHeaderRow.addView(btnReloadLyrics)
+        lyricsHeaderRow.addView(btnToggleLyricsExpand)
+
+        lyricsLinesContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(8, 12, 8, 12)
+        }
+        lyricsScrollView = ScrollView(this).apply {
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 210)
+            isVerticalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            setOnTouchListener { v, ev ->
+                v.parent?.requestDisallowInterceptTouchEvent(true)
+                false
+            }
+            addView(lyricsLinesContainer)
+        }
+
+        lyricsCardContainer.addView(lyricsHeaderRow)
+        lyricsCardContainer.addView(lyricsScrollView)
+        homeContent.addView(lyricsCardContainer)
         
         val divider = View(this).apply { layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 2).apply { setMargins(0, 80, 0, 40) }; setBackgroundColor(Color.parseColor("#33888888")) }
         btnAddToPlaylist = Button(this).apply { 
@@ -1330,15 +2538,34 @@ class MainActivity : AppCompatActivity() {
         playlistSongsContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
         val topBarFolder = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, 0, 0, 20) }
         txtFolderTitle = TextView(this).apply { text = "Carpeta"; textSize = 20f; typeface = Typeface.DEFAULT_BOLD; layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
-        btnBackFolder = Button(this).apply { text = "ATRAS"; setBackgroundColor(Color.TRANSPARENT); setOnClickListener { searchInput.text.clear(); playlistSongsContainer.visibility = View.GONE; scrollFoldersView.visibility = View.VISIBLE; btnSelectMode.visibility = View.GONE; btnDeleteSelected.visibility = View.GONE } }
+        btnBackFolder = Button(this).apply { text = "ATRAS"; setBackgroundColor(Color.TRANSPARENT); setOnClickListener { searchInput.text.clear(); playlistSongsContainer.visibility = View.GONE; scrollFoldersView.visibility = View.VISIBLE; btnSelectMode.visibility = View.GONE; btnDeleteSelected.visibility = View.GONE; if (::selectionActionsScroll.isInitialized) selectionActionsScroll.visibility = View.GONE } }
         btnSelectMode = Button(this).apply { text = "SELECCIONAR"; setBackgroundColor(Color.TRANSPARENT); setPadding(10,0,10,0); visibility = View.GONE }
-        btnDeleteSelected = ImageButton(this).apply { setImageResource(android.R.drawable.ic_menu_delete); background = null; setPadding(20,0,20,0); visibility = View.GONE }
+        btnDeleteSelected = ImageButton(this).apply { setImageResource(android.R.drawable.ic_menu_delete); setPadding(28, 18, 28, 18); visibility = View.GONE; layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 12, 0) } }
+        btnSelectAll = Button(this).apply { text = "Sel. todo"; isAllCaps = false; textSize = 12f; setPadding(26, 12, 26, 12); layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 12, 0) } }
+        btnAddSelectedToPlaylist = Button(this).apply { text = "+ Playlist"; isAllCaps = false; textSize = 12f; setPadding(26, 12, 26, 12); visibility = View.GONE; layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 12, 0) } }
+        btnRenameSelected = Button(this).apply { text = "Renombrar"; isAllCaps = false; textSize = 12f; setPadding(26, 12, 26, 12); visibility = View.GONE; layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 12, 0) } }
+
+        selectionActionsBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(btnSelectAll)
+            addView(btnAddSelectedToPlaylist)
+            addView(btnRenameSelected)
+            addView(btnDeleteSelected)
+        }
+        selectionActionsScroll = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            overScrollMode = View.OVER_SCROLL_NEVER
+            visibility = View.GONE
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 0, 16) }
+            addView(selectionActionsBar)
+        }
 
         btnCrearPlaylist = Button(this).apply { text = "Crear Carpeta"; setOnClickListener { mostrarDialogoCrear() }; layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 0, 20) } }
         txtFoldersHeader = TextView(this).apply { text = "Carpetas Existentes"; textSize = 22f; typeface = Typeface.DEFAULT_BOLD; setPadding(0, 10, 0, 20) }
-        topBarFolder.addView(btnBackFolder); topBarFolder.addView(txtFolderTitle); topBarFolder.addView(btnSelectMode); topBarFolder.addView(btnDeleteSelected)
+        topBarFolder.addView(btnBackFolder); topBarFolder.addView(txtFolderTitle); topBarFolder.addView(btnSelectMode)
         songsListVerticalContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        playlistSongsContainer.addView(topBarFolder); playlistSongsContainer.addView(ScrollView(this).apply { addView(songsListVerticalContainer) })
+        playlistSongsContainer.addView(topBarFolder); playlistSongsContainer.addView(selectionActionsScroll); playlistSongsContainer.addView(ScrollView(this).apply { addView(songsListVerticalContainer) })
         sectionPlaylist.addView(scrollFoldersView); sectionPlaylist.addView(playlistSongsContainer)
 
         // --- COLA ---
@@ -1516,7 +2743,7 @@ class MainActivity : AppCompatActivity() {
         txtSettingsHeader = TextView(this).apply { text = "Ajustes del Sistema"; textSize = 22f; setPadding(0, 20, 0, 30); setTypeface(null, Typeface.BOLD) }
         btnCambiarTema = Button(this).apply { text = "Cambiar Tema Visual"; setOnClickListener { mostrarSelectorTemas() }; layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 0, 0, 20) } }
         val txtHeaderPlayback = TextView(this).apply { text = "Ajustes de Reproducción"; textSize = 22f; setPadding(0, 60, 0, 30); setTypeface(null, Typeface.BOLD) }
-        switchCrossfade = Switch(this).apply { text = "Fundido Suave (Fade Out)"; textSize = 16f; isChecked = isCrossfadeEnabled; setPadding(40,40,40,40); setOnCheckedChangeListener { _, isChecked -> isCrossfadeEnabled = isChecked; musicService?.isCrossfadeEnabled = isChecked; musicService?.isCrossfadeEnabled = isChecked; prefs.edit().putBoolean("CROSSFADE", isChecked).apply() } }
+        switchCrossfade = Switch(this).apply { text = "Fundido Suave (Fade Out)"; textSize = 16f; isChecked = isCrossfadeEnabled; setPadding(40,40,40,40); setOnCheckedChangeListener { _, isChecked -> isCrossfadeEnabled = isChecked; musicService?.isCrossfadeEnabled = isChecked; prefs.edit().putBoolean("CROSSFADE", isChecked).apply() } }
         btnSleepTimer = Button(this).apply { text = "Temporizador de Apagado"; setOnClickListener { mostrarDialogoSleepTimer() }; layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 20, 0, 20) } }
 
         switchDynamicTheme = Switch(this).apply {
@@ -1690,8 +2917,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    
-
     private fun reproducirDesdeYoutube(
         vid: String,
         vtitle: String,
@@ -1846,6 +3071,8 @@ class MainActivity : AppCompatActivity() {
             tvContainer.alpha = 0f
             tvContainer.visibility = View.VISIBLE
             tvContainer.animate().alpha(1f).setDuration(220).start()
+            showTvHudTemporarily()
+            updateTvSubtitleVisibility()
             loadVideoForCurrentTrack()
         } else {
             releaseVideoPlayer()
@@ -1870,7 +3097,7 @@ class MainActivity : AppCompatActivity() {
 
         if (songPath.startsWith("LIVE_STREAM|")) {
             val rawTitle = songPath.split("|").getOrNull(2).orEmpty()
-            val safeName = rawTitle.replace(Regex("[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ _-]"), "").trim()
+            val safeName = rawTitle.replace(Regex("""[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ _-]"""), "").trim()
             if (safeName.isNotEmpty() && videosDir.exists()) {
                 videosDir.listFiles()?.firstOrNull {
                     it.isFile && it.nameWithoutExtension.equals(safeName, ignoreCase = true) && it.extension.lowercase() in videoExts
@@ -1980,10 +3207,11 @@ class MainActivity : AppCompatActivity() {
                     isVideoPrepared = true
                     adjustVideoAspectRatio(tvTextureView.width, tvTextureView.height)
                     val audioPos = musicService?.getCurrentPosition() ?: 0
-                    if (audioPos > 0 && vp.duration > 0) {
-                        vp.seekTo(audioPos.coerceAtMost((vp.duration - 200).coerceAtLeast(0)))
-                    }
-                    if (musicService?.isPlaying() == true) {
+                    val audioDur = musicService?.getDuration() ?: 0
+                    val durationsMatch = audioDur <= 0 || vp.duration <= 0 || kotlin.math.abs(vp.duration - audioDur) <= 8000
+                    if (audioPos > 500 && vp.duration > 0 && durationsMatch) {
+                        seekVideoSafely(vp, audioPos, startAfterSeek = true)
+                    } else if (musicService?.isPlaying() == true) {
                         vp.start()
                     }
                     tvStaticView.fadeOutStatic(380L)
@@ -2020,10 +3248,18 @@ class MainActivity : AppCompatActivity() {
 
         var scaleX = 1f
         var scaleY = 1f
-        if (videoRatio > viewRatio) {
-            scaleX = videoRatio / viewRatio
+        if (isTvFullscreen) {
+            if (videoRatio > viewRatio) {
+                scaleY = viewRatio / videoRatio
+            } else {
+                scaleX = videoRatio / viewRatio
+            }
         } else {
-            scaleY = viewRatio / videoRatio
+            if (videoRatio > viewRatio) {
+                scaleX = videoRatio / viewRatio
+            } else {
+                scaleY = viewRatio / videoRatio
+            }
         }
 
         val matrix = Matrix().apply {
@@ -2045,7 +3281,7 @@ class MainActivity : AppCompatActivity() {
             try {
                 val videosDir = File(getExternalFilesDir(null), "Base-Videos").apply { mkdirs() }
                 val baseName = if (currentPath.startsWith("LIVE_STREAM|")) {
-                    title.replace(Regex("[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ _-]"), "").trim().ifEmpty { "clip_stream" }
+                    title.replace(Regex("""[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ _-]"""), "").trim().ifEmpty { "clip_stream" }
                 } else {
                     File(currentPath).nameWithoutExtension
                 }
@@ -2055,11 +3291,11 @@ class MainActivity : AppCompatActivity() {
                     currentPath.split("|").getOrNull(4).orEmpty()
                 } else {
                     val cleanQuery = title
-                        .replace(Regex("\\s*[-–_]\\s*(Topic|VEVO|Official|Oficial|Music|Records|Entertainment|Channel|TV|HD|4K|Audio|Video|Lyrics)(\\s|$)", RegexOption.IGNORE_CASE), "")
-                        .replace(Regex("\\(.*?\\)", RegexOption.DOT_MATCHES_ALL), "")
-                        .replace(Regex("\\[.*?\\]", RegexOption.DOT_MATCHES_ALL), "")
+                        .replace(Regex("""\s*[-–_]\s*(Topic|VEVO|Official|Oficial|Music|Records|Entertainment|Channel|TV|HD|4K|Audio|Video|Lyrics)(\s|$)""", RegexOption.IGNORE_CASE), "")
+                        .replace(Regex("""\(.*?\)""", RegexOption.DOT_MATCHES_ALL), "")
+                        .replace(Regex("""\[.*?\]""", RegexOption.DOT_MATCHES_ALL), "")
                         .replace("_", " ")
-                        .replace(Regex("\\s{2,}"), " ")
+                        .replace(Regex("""\s{2,}"""), " ")
                         .trim()
                     val found = YtDlpRepository(this@MainActivity).searchYoutube("$cleanQuery official video", 1)
                     val vid = found.firstOrNull()?.get("id").orEmpty()
@@ -2114,12 +3350,43 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun seekVideoSafely(vp: MediaPlayer, targetMs: Int, startAfterSeek: Boolean = false) {
+        try {
+            val dur = vp.duration
+            if (dur <= 0) {
+                if (startAfterSeek && musicService?.isPlaying() == true && !vp.isPlaying) vp.start()
+                return
+            }
+            val clampedMs = targetMs.coerceIn(0, (dur - 250).coerceAtLeast(0))
+            isVideoSeeking = true
+            lastVideoSeekRealtimeMs = SystemClock.elapsedRealtime()
+            vp.setOnSeekCompleteListener { mp ->
+                isVideoSeeking = false
+                lastVideoSeekRealtimeMs = SystemClock.elapsedRealtime()
+                if (startAfterSeek && isTvMode && isVideoPrepared && musicService?.isPlaying() == true) {
+                    try {
+                        if (!mp.isPlaying) mp.start()
+                    } catch (_: Exception) {}
+                }
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vp.seekTo(clampedMs.toLong(), MediaPlayer.SEEK_CLOSEST)
+            } else {
+                vp.seekTo(clampedMs)
+            }
+        } catch (_: Exception) {
+            isVideoSeeking = false
+        }
+    }
+
     private fun releaseVideoPlayer() {
         videoStreamJob?.cancel()
         videoStreamJob = null
         liveThemeAnimator?.cancel()
         liveVideoThemeController?.stopAndRestore(currentTheme.accent, currentTheme.w2c1)
         isVideoPrepared = false
+        isVideoSeeking = false
+        lastVideoSeekRealtimeMs = 0L
         try {
             videoMediaPlayer?.stop()
         } catch (_: Exception) {}
@@ -2142,7 +3409,7 @@ class MainActivity : AppCompatActivity() {
     private fun mostrarSelectorTemas() { val themeNames = THEMES.keys.toTypedArray(); androidx.appcompat.app.AlertDialog.Builder(this).setTitle("Selecciona un Tema").setItems(themeNames) { _, which -> val selectedName = themeNames[which]; prefs.edit().putString("APP_THEME", selectedName).apply(); animateThemeTransition(THEMES[selectedName]!!) }.show() }
 
     private fun toggleFavCurrentSong() {
-        if (playlistActual.isEmpty()) return
+        if (playlistActual.isEmpty() || currentIndex !in playlistActual.indices) return
         val rutaArchivo = playlistActual[currentIndex]
         
         if (rutaArchivo.startsWith("LIVE_STREAM|")) {
@@ -2316,51 +3583,357 @@ class MainActivity : AppCompatActivity() {
             .show() 
     }
 
-    private fun abrirCarpetaPlaylist(folderName: String) { 
-        val lista = mapPlaylists[folderName] ?: return; txtFolderTitle.text = folderName; songsListVerticalContainer.removeAllViews()
-        btnSelectMode.visibility = View.VISIBLE
-        var isSelectionMode = false; val selectedSongs = mutableSetOf<String>()
+    private fun deleteAssociatedVideosForSong(audioFile: File): Int {
+        var deletedCount = 0
+        val baseName = audioFile.nameWithoutExtension
+        val videoExts = setOf("mp4", "mkv", "mov", "3gp", "webm")
+        val videosDir = File(getExternalFilesDir(null), "Base-Videos")
+
+        if (videosDir.exists()) {
+            videosDir.listFiles()?.forEach { f ->
+                if (f.isFile && f.nameWithoutExtension.equals(baseName, ignoreCase = true) && f.extension.lowercase() in videoExts) {
+                    if (f.delete()) deletedCount++
+                }
+            }
+        }
+        audioFile.parentFile?.listFiles()?.forEach { f ->
+            if (f.isFile &&
+                f.absolutePath != audioFile.absolutePath &&
+                f.nameWithoutExtension.equals(baseName, ignoreCase = true) &&
+                f.extension.lowercase() in videoExts
+            ) {
+                if (f.delete()) deletedCount++
+            }
+        }
+        return deletedCount
+    }
+
+    private fun abrirCarpetaPlaylist(folderName: String) {
+        val lista = mapPlaylists[folderName] ?: return
+        txtFolderTitle.text = folderName
+        songsListVerticalContainer.removeAllViews()
+        btnSelectMode.visibility = if (lista.isEmpty()) View.GONE else View.VISIBLE
+
+        var isSelectionMode = false
+        val selectedSongs = mutableSetOf<String>()
 
         fun updateSelectionUI() {
             btnSelectMode.text = if (isSelectionMode) "CANCELAR" else "SELECCIONAR"
+            selectionActionsScroll.visibility = if (isSelectionMode && lista.isNotEmpty()) View.VISIBLE else View.GONE
+
+            val allSelected = lista.isNotEmpty() && selectedSongs.size == lista.size
+            btnSelectAll.text = if (allSelected) "Quitar sel." else "Sel. todo"
+            btnAddSelectedToPlaylist.visibility = if (isSelectionMode && selectedSongs.isNotEmpty()) View.VISIBLE else View.GONE
+            btnRenameSelected.visibility = if (isSelectionMode && selectedSongs.size == 1) View.VISIBLE else View.GONE
             btnDeleteSelected.visibility = if (isSelectionMode && selectedSongs.isNotEmpty()) View.VISIBLE else View.GONE
+
             for (i in 0 until songsListVerticalContainer.childCount) {
                 val row = songsListVerticalContainer.getChildAt(i) as? LinearLayout ?: continue
-                val songPath = row.tag as? String ?: continue; val dot = row.getChildAt(2) as? View ?: continue
-                if (isSelectionMode) { dot.visibility = View.VISIBLE; (dot.background as GradientDrawable).setColor(if (selectedSongs.contains(songPath)) currentTheme.accent else Color.TRANSPARENT) } else { dot.visibility = View.GONE }
+                val songPath = row.tag as? String ?: continue
+                val dot = row.getChildAt(2) as? View ?: continue
+                if (isSelectionMode) {
+                    dot.visibility = View.VISIBLE
+                    (dot.background as GradientDrawable).setColor(if (selectedSongs.contains(songPath)) currentTheme.accent else Color.TRANSPARENT)
+                } else {
+                    dot.visibility = View.GONE
+                }
             }
         }
 
-        btnSelectMode.setOnClickListener { isSelectionMode = !isSelectionMode; if (!isSelectionMode) selectedSongs.clear(); updateSelectionUI() }
+        btnSelectMode.setOnClickListener {
+            isSelectionMode = !isSelectionMode
+            if (!isSelectionMode) selectedSongs.clear()
+            updateSelectionUI()
+        }
+
+        // 1) Seleccionar todo / Deseleccionar todo
+        btnSelectAll.setOnClickListener {
+            if (selectedSongs.size == lista.size) {
+                selectedSongs.clear()
+            } else {
+                selectedSongs.clear()
+                selectedSongs.addAll(lista)
+            }
+            updateSelectionUI()
+        }
+
+        // 2) Agregar seleccionadas a otra playlist
+        btnAddSelectedToPlaylist.setOnClickListener {
+            if (selectedSongs.isEmpty()) return@setOnClickListener
+            val targetPlaylists = viewModel.playlists.value.keys
+                .filter { !it.equals(folderName, ignoreCase = true) }
+                .toMutableList()
+            if (targetPlaylists.isEmpty()) {
+                listOf("Mi favs", "Para Entrenar", "Música Relax").forEach { defName ->
+                    if (!defName.equals(folderName, ignoreCase = true)) targetPlaylists.add(defName)
+                }
+            }
+
+            androidx.appcompat.app.AlertDialog.Builder(this)
+                .setTitle("Agregar ${selectedSongs.size} canción(es) a...")
+                .setItems(targetPlaylists.toTypedArray()) { _, which ->
+                    val destPlaylist = targetPlaylists[which]
+                    val songsToCopy = selectedSongs.toList()
+                    var copiedCount = 0
+
+                    songsToCopy.forEach { songPath ->
+                        viewModel.addSongToPlaylist(songPath, destPlaylist) { success ->
+                            if (success) {
+                                copiedCount++
+                                if (destPlaylist.contains("fav", ignoreCase = true) || destPlaylist.contains("gustas", ignoreCase = true)) {
+                                    if (!viewModel.isSongLiked(songPath)) {
+                                        viewModel.toggleLike(songPath)
+                                    }
+                                }
+                            }
+                            if (copiedCount == songsToCopy.size) {
+                                Toast.makeText(this, "Se agregaron $copiedCount canción(es) a '$destPlaylist'", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    }
+
+                    isSelectionMode = false
+                    selectedSongs.clear()
+                    updateSelectionUI()
+                }
+                .setNegativeButton("Cancelar", null)
+                .show()
+        }
+
+        // 3) Editar el nombre si hay exactamente 1 canción seleccionada
+        btnRenameSelected.setOnClickListener {
+            val songPath = selectedSongs.singleOrNull() ?: return@setOnClickListener
+            val oldFile = File(songPath)
+            if (!oldFile.exists()) {
+                Toast.makeText(this, "No se encontró el archivo original", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+
+            val currentDisplayName = oldFile.nameWithoutExtension.replace("_", " ")
+            val inputName = EditText(this).apply {
+                setText(currentDisplayName)
+                setSelection(text.length)
+                hint = "Nuevo nombre de la canción"
+            }
+            val dialogContainer = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(50, 30, 50, 20)
+                addView(inputName)
+            }
+
+            androidx.appcompat.app.AlertDialog.Builder(this)
+                .setTitle("Editar nombre de canción")
+                .setView(dialogContainer)
+                .setPositiveButton("Guardar") { _, _ ->
+                    val cleanName = inputName.text.toString()
+                        .replace(Regex("[\\/:*?\"<>|]"), "")
+                        .trim()
+
+                    if (cleanName.isEmpty()) {
+                        Toast.makeText(this, "El nombre no puede estar vacío", Toast.LENGTH_SHORT).show()
+                        return@setPositiveButton
+                    }
+
+                    val newFile = File(oldFile.parentFile, "$cleanName.${oldFile.extension}")
+                    if (newFile.absolutePath == oldFile.absolutePath) {
+                        isSelectionMode = false
+                        selectedSongs.clear()
+                        updateSelectionUI()
+                        return@setPositiveButton
+                    }
+
+                    if (newFile.exists()) {
+                        Toast.makeText(this, "Ya existe una canción con ese nombre", Toast.LENGTH_SHORT).show()
+                        return@setPositiveButton
+                    }
+
+                    val oldBaseName = oldFile.nameWithoutExtension
+                    if (oldFile.renameTo(newFile)) {
+                        LrcManager.recordOriginalTitle(
+                            this,
+                            newFile.absolutePath,
+                            oldBaseName.replace("_", " ").trim()
+                        )
+                        // Renombrar carátula externa si existe
+                        oldFile.parentFile?.listFiles()?.forEach { f ->
+                            if (f.isFile && f.nameWithoutExtension.equals(oldBaseName, ignoreCase = true) &&
+                                (f.extension.equals("jpg", true) || f.extension.equals("png", true))
+                            ) {
+                                f.renameTo(File(f.parentFile, "$cleanName.${f.extension}"))
+                            }
+                        }
+                        // Renombrar videoclip asociado en Base-Videos si existe
+                        val videosDir = File(getExternalFilesDir(null), "Base-Videos")
+                        if (videosDir.exists()) {
+                            videosDir.listFiles()?.forEach { vf ->
+                                if (vf.isFile && vf.nameWithoutExtension.equals(oldBaseName, ignoreCase = true)) {
+                                    vf.renameTo(File(videosDir, "$cleanName.${vf.extension}"))
+                                }
+                            }
+                        }
+
+                        // Actualizar cola en memoria si la canción estaba cargada
+                        val qIdx = playlistActual.indexOf(songPath)
+                        if (qIdx >= 0) {
+                            playlistActual[qIdx] = newFile.absolutePath
+                            if (qIdx == currentIndex) {
+                                txtTitle.text = cleanName
+                            }
+                            if (::queueAdapter.isInitialized) queueAdapter.notifyItemChanged(qIdx)
+                        }
+                        musicService?.playlist?.let { srvQueue ->
+                            val sIdx = srvQueue.indexOf(songPath)
+                            if (sIdx >= 0) srvQueue[sIdx] = newFile.absolutePath
+                        }
+
+                        viewModel.loadLocalMusic()
+                        mapPlaylists = MusicRepository(this).getPlaylists().toMutableMap()
+                        Toast.makeText(this, "Canción renombrada", Toast.LENGTH_SHORT).show()
+                        abrirCarpetaPlaylist(folderName)
+                    } else {
+                        Toast.makeText(this, "No se pudo renombrar el archivo", Toast.LENGTH_SHORT).show()
+                    }
+                }
+                .setNegativeButton("Cancelar", null)
+                .show()
+        }
+
+        // 4) Borrar: 2 opciones (Solo video vs Canción y video) + Confirmación
         btnDeleteSelected.setOnClickListener {
             if (selectedSongs.isEmpty()) return@setOnClickListener
-            
-            for (song in selectedSongs) {
-                val audioFile = java.io.File(song)
-                java.io.File(getExternalFilesDir(null), "Base-Videos/${audioFile.nameWithoutExtension}.mp4").delete()
-                audioFile.delete()
-            }
-            musicService?.handleDeletedSongs(selectedSongs)
-            
-            if (::queueAdapter.isInitialized) queueAdapter.updateList(playlistActual) else precargarCaratulasCola(playlistActual)
-            isSelectionMode = false; selectedSongs.clear(); btnBackFolder.performClick(); viewModel.loadLocalMusic()
+            val count = selectedSongs.size
+            val opciones = arrayOf(
+                "Borrar solo video(s)",
+                "Borrar canción(es) y video(s)"
+            )
+
+            androidx.appcompat.app.AlertDialog.Builder(this)
+                .setTitle("Opciones de borrado ($count seleccionada(s))")
+                .setItems(opciones) { _, which ->
+                    val soloVideo = (which == 0)
+                    val tituloConfirm = if (soloVideo) "Confirmar borrado de video" else "Confirmar borrado de canción"
+                    val mensajeConfirm = if (soloVideo) {
+                        "¿Seguro que deseas eliminar únicamente los videoclips asociados a las $count canción(es) seleccionada(s)? El audio se conservará."
+                    } else {
+                        "¿Seguro que deseas eliminar permanentemente las $count canción(es) seleccionada(s) y sus videoclips asociados?"
+                    }
+
+                    androidx.appcompat.app.AlertDialog.Builder(this)
+                        .setTitle(tituloConfirm)
+                        .setMessage(mensajeConfirm)
+                        .setPositiveButton("Confirmar") { _, _ ->
+                            val toProcess = selectedSongs.toSet()
+
+                            if (soloVideo) {
+                                var videosEliminados = 0
+                                for (song in toProcess) {
+                                    videosEliminados += deleteAssociatedVideosForSong(File(song))
+                                }
+                                if (isTvMode) {
+                                    loadVideoForCurrentTrack()
+                                }
+                                Toast.makeText(
+                                    this,
+                                    if (videosEliminados > 0) "Se eliminaron $videosEliminados videoclip(s)" else "No había videoclips asociados para borrar",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                                isSelectionMode = false
+                                selectedSongs.clear()
+                                updateSelectionUI()
+                            } else {
+                                for (song in toProcess) {
+                                    val audioFile = File(song)
+                                    val baseName = audioFile.nameWithoutExtension
+                                    deleteAssociatedVideosForSong(audioFile)
+                                    audioFile.parentFile?.listFiles()?.forEach { f ->
+                                        if (f.isFile && f.nameWithoutExtension.equals(baseName, ignoreCase = true) &&
+                                            (f.extension.equals("jpg", true) || f.extension.equals("png", true))
+                                        ) {
+                                            f.delete()
+                                        }
+                                    }
+                                    audioFile.delete()
+                                }
+
+                                musicService?.handleDeletedSongs(toProcess)
+                                playlistActual.removeAll(toProcess)
+                                if (::queueAdapter.isInitialized) queueAdapter.updateList(playlistActual) else precargarCaratulasCola(playlistActual)
+
+                                viewModel.loadLocalMusic()
+                                mapPlaylists = MusicRepository(this).getPlaylists().toMutableMap()
+                                Toast.makeText(this, "Canción(es) y videoclip(s) eliminados", Toast.LENGTH_SHORT).show()
+
+                                val restantes = mapPlaylists[folderName].orEmpty()
+                                if (restantes.isEmpty()) {
+                                    isSelectionMode = false
+                                    selectedSongs.clear()
+                                    btnBackFolder.performClick()
+                                } else {
+                                    abrirCarpetaPlaylist(folderName)
+                                }
+                            }
+                        }
+                        .setNegativeButton("Cancelar", null)
+                        .show()
+                }
+                .setNegativeButton("Cancelar", null)
+                .show()
         }
 
         lista.forEachIndexed { idx, songPath ->
-            val songRow = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(25, 25, 25, 25); background = getGlassDrawable(currentTheme.isDark); layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 8, 0, 8) }; tag = songPath }
-            val imgCover = ImageView(this).apply { layoutParams = LinearLayout.LayoutParams(130, 130).apply { setMargins(0, 0, 30, 0) }; scaleType = ImageView.ScaleType.CENTER_CROP; clipToOutline = true; outlineProvider = object : ViewOutlineProvider() { override fun getOutline(view: View, outline: Outline) { outline.setRoundRect(0, 0, view.width, view.height, 20f) } }; setBackgroundColor(Color.parseColor(if(currentTheme.isDark) "#2A2A2A" else "#E0E0E0")) }
-            loadCoverListAsync(songPath, imgCover)
-            val txtName = TextView(this).apply { text = songPath.substringAfterLast("/").substringBeforeLast(".").replace("_", " "); textSize = 15f; applyContrastingText(currentTheme.isDark); layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f) }
-            val dotSelection = View(this).apply { layoutParams = LinearLayout.LayoutParams(40, 40).apply { setMargins(20, 0, 10, 0) }; background = GradientDrawable().apply { cornerRadius = 20f; setColor(Color.TRANSPARENT); setStroke(4, currentTheme.accentDark) }; visibility = View.GONE }
-
-            songRow.setOnClickListener { 
-                if (isSelectionMode) { if (selectedSongs.contains(songPath)) selectedSongs.remove(songPath) else selectedSongs.add(songPath); updateSelectionUI() } else { resetLoopState(); nombrePlaylistActual = folderName; playlistActual = lista.toMutableList(); currentIndex = idx; if(::queueAdapter.isInitialized) queueAdapter.updateList(playlistActual); reproducirCancionActual(); cambiarPestana(0) }
+            val songRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(25, 25, 25, 25)
+                background = getGlassDrawable(currentTheme.isDark)
+                layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 8, 0, 8) }
+                tag = songPath
             }
-            songRow.addView(imgCover); songRow.addView(txtName); songRow.addView(dotSelection); songsListVerticalContainer.addView(songRow)
-        }
-        updateSelectionUI(); scrollFoldersView.visibility = View.GONE; playlistSongsContainer.visibility = View.VISIBLE
-    }
+            val imgCover = ImageView(this).apply {
+                layoutParams = LinearLayout.LayoutParams(130, 130).apply { setMargins(0, 0, 30, 0) }
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                clipToOutline = true
+                outlineProvider = object : ViewOutlineProvider() {
+                    override fun getOutline(view: View, outline: Outline) { outline.setRoundRect(0, 0, view.width, view.height, 20f) }
+                }
+                setBackgroundColor(Color.parseColor(if (currentTheme.isDark) "#2A2A2A" else "#E0E0E0"))
+            }
+            loadCoverListAsync(songPath, imgCover)
+            val txtName = TextView(this).apply {
+                text = songPath.substringAfterLast("/").substringBeforeLast(".").replace("_", " ")
+                textSize = 15f
+                applyContrastingText(currentTheme.isDark)
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            }
+            val dotSelection = View(this).apply {
+                layoutParams = LinearLayout.LayoutParams(40, 40).apply { setMargins(20, 0, 10, 0) }
+                background = GradientDrawable().apply { cornerRadius = 20f; setColor(Color.TRANSPARENT); setStroke(4, currentTheme.accentDark) }
+                visibility = View.GONE
+            }
 
+            songRow.setOnClickListener {
+                if (isSelectionMode) {
+                    if (selectedSongs.contains(songPath)) selectedSongs.remove(songPath) else selectedSongs.add(songPath)
+                    updateSelectionUI()
+                } else {
+                    resetLoopState()
+                    nombrePlaylistActual = folderName
+                    playlistActual = lista.toMutableList()
+                    currentIndex = idx
+                    if (::queueAdapter.isInitialized) queueAdapter.updateList(playlistActual)
+                    reproducirCancionActual()
+                    cambiarPestana(0)
+                }
+            }
+            songRow.addView(imgCover)
+            songRow.addView(txtName)
+            songRow.addView(dotSelection)
+            songsListVerticalContainer.addView(songRow)
+        }
+        updateSelectionUI()
+        scrollFoldersView.visibility = View.GONE
+        playlistSongsContainer.visibility = View.VISIBLE
+    }
     private fun resetLoopState() {
         isLooping = false
         musicService?.isLooping = false
@@ -2483,9 +4056,27 @@ class MainActivity : AppCompatActivity() {
     }
     
     private fun togglePlayPause() {
-        if (musicService != null) {
-            musicService?.togglePlayPause()
-        } else if (playlistActual.isNotEmpty()) {
+        if (playlistActual.isEmpty()) {
+            val primeraConCanciones = mapPlaylists.entries.firstOrNull { it.value.isNotEmpty() }
+            if (primeraConCanciones != null) {
+                nombrePlaylistActual = primeraConCanciones.key
+                playlistActual = primeraConCanciones.value.toMutableList()
+                currentIndex = 0
+                if (::queueAdapter.isInitialized) queueAdapter.updateList(playlistActual)
+            } else {
+                Toast.makeText(this, "No hay canciones disponibles para reproducir", Toast.LENGTH_SHORT).show()
+                return
+            }
+        }
+
+        val srv = musicService
+        if (srv != null) {
+            if (srv.playlist.isEmpty()) {
+                reproducirCancionActual()
+            } else {
+                srv.togglePlayPause()
+            }
+        } else {
             reproducirCancionActual()
         }
     }
@@ -2493,12 +4084,34 @@ class MainActivity : AppCompatActivity() {
     private fun reproducirSiguiente() {
         if (playlistActual.isEmpty()) return
         resetLoopState()
-        musicService?.playNext()
+        val srv = musicService
+        if (srv != null) {
+            if (srv.playlist.isEmpty()) {
+                currentIndex = (currentIndex + 1) % playlistActual.size
+                reproducirCancionActual()
+            } else {
+                srv.playNext()
+            }
+        } else {
+            currentIndex = (currentIndex + 1) % playlistActual.size
+            reproducirCancionActual()
+        }
     }
 
     private fun reproducirAnterior() {
         if (playlistActual.isEmpty()) return
-        musicService?.playPrevious()
+        val srv = musicService
+        if (srv != null) {
+            if (srv.playlist.isEmpty()) {
+                currentIndex = if (currentIndex - 1 < 0) playlistActual.size - 1 else currentIndex - 1
+                reproducirCancionActual()
+            } else {
+                srv.playPrevious()
+            }
+        } else {
+            currentIndex = if (currentIndex - 1 < 0) playlistActual.size - 1 else currentIndex - 1
+            reproducirCancionActual()
+        }
     }
     
     private fun actualizarBarraProgreso() {
@@ -2512,19 +4125,36 @@ class MainActivity : AppCompatActivity() {
                         if (dur > 0) {
                             wavySeekBar.progress = pos.toFloat() / dur.toFloat()
                             txtCurrentTime.text = formatTime(pos)
-                            if (isTvMode && isVideoPrepared) {
+                            if (isTvMode && isVideoPrepared && !isVideoSeeking) {
                                 videoMediaPlayer?.let { vp ->
-                                    if (vp.isPlaying && vp.duration > 0 && kotlin.math.abs(vp.currentPosition - pos) > 650) {
-                                        vp.seekTo(pos.coerceAtMost(vp.duration))
+                                    val now = SystemClock.elapsedRealtime()
+                                    val durationsMatch = dur <= 0 || vp.duration <= 0 || kotlin.math.abs(vp.duration - dur) <= 8000
+                                    if (vp.isPlaying && vp.duration > 0 && durationsMatch &&
+                                        (now - lastVideoSeekRealtimeMs) > 4000L &&
+                                        kotlin.math.abs(vp.currentPosition - pos) > 2200
+                                    ) {
+                                        seekVideoSafely(vp, pos, startAfterSeek = false)
                                     }
                                 }
                             }
                         }
                     }
                 } catch (_: Exception) {}
-                handler.postDelayed(this, 1000)
+                try {
+                    val srv = musicService
+                    if (srv != null && srv.isPlaying()) {
+                        updateLyricsForPosition(srv.getCurrentPosition())
+                        if (audioVisualizer == null) {
+                            simBeatPhase += 0.35f
+                            val sim = (0.14f + 0.14f * sin(simBeatPhase)).coerceIn(0f, 1f)
+                            imgVinyl.beatPulse = sim
+                            waveBackgroundView.bassEnergy = sim
+                        }
+                    }
+                } catch (_: Exception) {}
+                handler.postDelayed(this, 250)
             }
-        }, 1000)
+        }, 250)
     }
 
     private fun formatTime(ms: Int): String {
@@ -2554,8 +4184,447 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun showTvHudTemporarily() {
+        if (!::tvFloatingHud.isInitialized) return
+        handler.removeCallbacks(tvHudHideRunnable)
+        tvFloatingHud.animate().cancel()
+        tvFloatingHud.alpha = 1f
+        tvFloatingHud.visibility = View.VISIBLE
+        handler.postDelayed(tvHudHideRunnable, 3000L)
+    }
+
+    private fun toggleTvFullscreen() {
+        if (isTvFullscreen) exitTvFullscreen() else enterTvFullscreen()
+    }
+
+    private fun enterTvFullscreen() {
+        if (isTvFullscreen || !isTvMode) return
+        isTvFullscreen = true
+        tvOriginalIndex = mediaStageContainer.indexOfChild(tvContainer).coerceAtLeast(0)
+        tvOriginalLp = tvContainer.layoutParams
+        mediaStageContainer.removeView(tvContainer)
+
+        val host = FrameLayout(this).apply {
+            setBackgroundColor(Color.BLACK)
+            elevation = 60f
+            layoutParams = CoordinatorLayout.LayoutParams(
+                CoordinatorLayout.LayoutParams.MATCH_PARENT,
+                CoordinatorLayout.LayoutParams.MATCH_PARENT
+            )
+        }
+        tvFullscreenHost = host
+        mainLayout.addView(host)
+
+        tvContainer.background = GradientDrawable().apply { setColor(Color.BLACK) }
+        host.addView(tvContainer, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        ))
+
+        bottomNavGlass.visibility = View.GONE
+        btnTvFullscreen.text = "SALIR"
+        tvFsTransportRow.visibility = View.VISIBLE
+        btnTvFsPlayPause.setImageResource(
+            if (musicService?.isPlaying() == true) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
+        )
+        (txtTvSubtitle.layoutParams as? FrameLayout.LayoutParams)?.bottomMargin = 130
+        txtTvSubtitle.requestLayout()
+
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.insetsController?.let { ctrl ->
+                ctrl.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
+                ctrl.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+        }
+        tvContainer.post { adjustVideoAspectRatio(tvTextureView.width, tvTextureView.height) }
+    }
+
+    private fun exitTvFullscreen() {
+        if (!isTvFullscreen) return
+        isTvFullscreen = false
+        tvFullscreenHost?.let { host ->
+            host.removeView(tvContainer)
+            mainLayout.removeView(host)
+        }
+        tvFullscreenHost = null
+
+        tvContainer.background = GradientDrawable().apply {
+            setColor(Color.parseColor("#141414"))
+            cornerRadius = 38f
+            setStroke(4, Color.parseColor("#33FFFFFF"))
+        }
+        val restoreLp = tvOriginalLp ?: FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, 520, Gravity.CENTER)
+        mediaStageContainer.addView(tvContainer, tvOriginalIndex.coerceAtMost(mediaStageContainer.childCount), restoreLp)
+
+        bottomNavGlass.visibility = View.VISIBLE
+        btnTvFullscreen.text = "⛶"
+        tvFsTransportRow.visibility = View.GONE
+        (txtTvSubtitle.layoutParams as? FrameLayout.LayoutParams)?.bottomMargin = 24
+        txtTvSubtitle.requestLayout()
+
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.insetsController?.show(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
+        }
+        tvContainer.post { adjustVideoAspectRatio(tvTextureView.width, tvTextureView.height) }
+    }
+
+    private fun startAudioVisualizer() {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) return
+        if (audioVisualizer != null) return
+        try {
+            val captureSize = Visualizer.getCaptureSizeRange()[1].coerceAtMost(512)
+            audioVisualizer = Visualizer(0).apply {
+                this.captureSize = captureSize
+                setDataCaptureListener(object : Visualizer.OnDataCaptureListener {
+                    override fun onWaveFormDataCapture(v: Visualizer?, waveform: ByteArray?, samplingRate: Int) {}
+                    override fun onFftDataCapture(v: Visualizer?, fft: ByteArray?, samplingRate: Int) {
+                        if (fft == null || fft.size < 32) return
+                        var bassSum = 0.0
+                        for (i in 1..6) {
+                            val r = fft[2 * i].toDouble()
+                            val im = fft[2 * i + 1].toDouble()
+                            bassSum += hypot(r, im)
+                        }
+                        var midSum = 0.0
+                        for (i in 7..20) {
+                            val r = fft[2 * i].toDouble()
+                            val im = fft[2 * i + 1].toDouble()
+                            midSum += hypot(r, im)
+                        }
+                        val bassNorm = ((bassSum / 6.0) / 95.0).toFloat().coerceIn(0f, 1f)
+                        val midNorm = ((midSum / 14.0) / 70.0).toFloat().coerceIn(0f, 1f)
+                        if (bassNorm > imgVinyl.beatPulse) imgVinyl.beatPulse = bassNorm
+                        if (bassNorm > waveBackgroundView.bassEnergy) waveBackgroundView.bassEnergy = bassNorm
+                        if (midNorm > waveBackgroundView.midEnergy) waveBackgroundView.midEnergy = midNorm
+                    }
+                }, Visualizer.getMaxCaptureRate() / 2, false, true)
+                enabled = true
+            }
+        } catch (_: Exception) {
+            audioVisualizer = null
+        }
+    }
+
+    private fun stopAudioVisualizer() {
+        try {
+            audioVisualizer?.enabled = false
+            audioVisualizer?.release()
+        } catch (_: Exception) {}
+        audioVisualizer = null
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED &&
+            musicService?.isPlaying() == true
+        ) {
+            startAudioVisualizer()
+        }
+    }
+
+    private fun loadLyricsForTrack(songPath: String, displayTitle: String, forceRefresh: Boolean = false) {
+        lyricsFetchJob?.cancel()
+        currentLyrics = emptyList()
+        activeLyricIndex = -1
+        renderLyricsLines(emptyList(), statusMessage = "Buscando letra sincronizada...")
+        updateTvSubtitleVisibility()
+
+        lyricsFetchJob = lifecycleScope.launch(Dispatchers.IO) {
+            val savedOffset = LrcManager.getOffsetMs(this@MainActivity, songPath, displayTitle)
+            val lines = LrcManager.fetchOrLoadLyrics(this@MainActivity, songPath, displayTitle, forceRefresh)
+            withContext(Dispatchers.Main) {
+                if (playlistActual.getOrNull(currentIndex) != songPath) return@withContext
+                currentLyricOffsetMs = savedOffset
+                currentLyrics = lines
+                activeLyricIndex = -1
+                if (lines.isEmpty()) {
+                    renderLyricsLines(emptyList(), statusMessage = "No existe la letra actualmente")
+                } else {
+                    renderLyricsLines(lines, statusMessage = null)
+                    val pos = musicService?.getCurrentPosition() ?: 0
+                    updateLyricsForPosition(pos)
+                }
+                updateTvSubtitleVisibility()
+            }
+        }
+    }
+
+    private fun promptSetYoutubeLinkForLyrics() {
+        val songPath = playlistActual.getOrNull(currentIndex) ?: return
+        val title = txtTitle.text.toString()
+        val input = EditText(this).apply {
+            hint = "https://www.youtube.com/watch?v=..."
+            setText(LrcManager.resolveVideoUrlForSong(this@MainActivity, songPath, title) ?: "")
+            setSelection(text.length)
+        }
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(48, 24, 48, 12)
+            addView(input)
+        }
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Enlace de YouTube para letra karaoke")
+            .setMessage("Pega el link del video para extraer sus subtítulos sincronizados:")
+            .setView(box)
+            .setPositiveButton("Obtener letra") { _, _ ->
+                val url = input.text.toString().trim()
+                if (url.isNotEmpty()) {
+                    LrcManager.saveVideoSourceForSong(this, songPath, title, url)
+                    loadLyricsForTrack(songPath, title, forceRefresh = true)
+                }
+            }
+            .setNegativeButton("Cancelar", null)
+            .show()
+    }
+
+    private fun adjustLyricOffset(deltaMs: Long) {
+        val songPath = playlistActual.getOrNull(currentIndex) ?: return
+        val title = txtTitle.text.toString()
+        currentLyricOffsetMs = (currentLyricOffsetMs + deltaMs).coerceIn(-15_000L, 15_000L)
+        LrcManager.setOffsetMs(this, songPath, title, currentLyricOffsetMs)
+        val secStr = String.format("%+.1fs", currentLyricOffsetMs / 1000.0)
+        txtLyricsHeader.text = if (currentLyricOffsetMs == 0L) "LETRA KARAOKE" else "LETRA ($secStr)"
+        val pos = (musicService?.getCurrentPosition() ?: 0).toLong() + currentLyricOffsetMs
+        activeLyricIndex = LrcManager.findActiveLineIndex(currentLyrics, pos)
+        refreshLyricsHighlight(forceScroll = true, currentPosMs = pos)
+        updateTvSubtitleVisibility()
+        Toast.makeText(this, "Ajuste de letra: $secStr", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun openLyricsStudioDialog() {
+        val songPath = playlistActual.getOrNull(currentIndex) ?: return
+        val title = txtTitle.text.toString()
+
+        val searchInput = EditText(this).apply {
+            hint = "Buscar letra (Artista - Canción)"
+            setText(title.replace("_", " "))
+        }
+        val editorInput = EditText(this).apply {
+            hint = "Pega o edita líneas [mm:ss.xx] letra..."
+            minLines = 6
+            maxLines = 12
+            gravity = Gravity.TOP or Gravity.START
+            setText(
+                if (currentLyrics.isNotEmpty()) LrcManager.toLrcText(currentLyrics)
+                else ""
+            )
+        }
+        val btnStampNow = Button(this).apply {
+            text = "Insertar tiempo actual en la letra"
+            isAllCaps = false
+            setOnClickListener {
+                val nowMs = ((musicService?.getCurrentPosition() ?: 0).toLong() + currentLyricOffsetMs).coerceAtLeast(0L)
+                val mins = nowMs / 60_000L
+                val secs = (nowMs % 60_000L) / 1000L
+                val centis = (nowMs % 1000L) / 10L
+                val stamp = String.format("[%02d:%02d.%02d] ", mins, secs, centis)
+                val start = editorInput.selectionStart.coerceIn(0, editorInput.text.length)
+                editorInput.text.insert(start, stamp)
+            }
+        }
+        val btnSearchOnline = Button(this).apply {
+            text = "Buscar letra sincronizada"
+            isAllCaps = false
+            setOnClickListener {
+                val query = searchInput.text.toString().trim()
+                if (query.isEmpty()) return@setOnClickListener
+                Toast.makeText(this@MainActivity, "Buscando letra...", Toast.LENGTH_SHORT).show()
+                lifecycleScope.launch(Dispatchers.IO) {
+                    val found = LrcManager.searchSyncedLyricsByQuery(this@MainActivity, songPath, title, query)
+                    withContext(Dispatchers.Main) {
+                        if (found.isNotEmpty()) {
+                            editorInput.setText(LrcManager.toLrcText(found))
+                            currentLyrics = found
+                            activeLyricIndex = -1
+                            renderLyricsLines(found, null)
+                            Toast.makeText(this@MainActivity, "Letra sincronizada cargada (${found.size} líneas)", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(this@MainActivity, "No se encontró letra sincronizada", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            }
+        }
+
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(44, 24, 44, 12)
+            addView(searchInput)
+            addView(btnSearchOnline)
+            addView(btnStampNow)
+            addView(editorInput)
+        }
+
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Estudio de Letras Sincronizadas")
+            .setView(container)
+            .setPositiveButton("Guardar letra") { _, _ ->
+                val raw = editorInput.text.toString()
+                if (raw.isNotBlank()) {
+                    val parsed = LrcManager.saveCustomLrcForTrack(this, songPath, title, raw)
+                    currentLyrics = parsed
+                    activeLyricIndex = -1
+                    renderLyricsLines(parsed, null)
+                    val pos = (musicService?.getCurrentPosition() ?: 0).toLong() + currentLyricOffsetMs
+                    updateLyricsForPosition(pos.toInt())
+                    Toast.makeText(this, "Letra guardada", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNeutralButton("Link YouTube") { _, _ ->
+                promptSetYoutubeLinkForLyrics()
+            }
+            .setNegativeButton("Cerrar", null)
+            .show()
+    }
+
+    private fun seekToLyricLine(index: Int, line: LyricLine) {
+        if (line.timeMs < 0L) {
+            Toast.makeText(this, "Esta línea no tiene marca de tiempo", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val targetMs = (line.timeMs - currentLyricOffsetMs).toInt().coerceAtLeast(0)
+        try {
+            musicService?.seekTo(targetMs)
+        } catch (_: Exception) {}
+
+        if (isTvMode && isVideoPrepared) {
+            videoMediaPlayer?.let { vp ->
+                seekVideoSafely(vp, targetMs, startAfterSeek = false)
+            }
+        }
+
+        val mins = targetMs / 60000
+        val secs = (targetMs / 1000) % 60
+        txtCurrentTime.text = String.format("%d:%02d", mins, secs)
+        try {
+            wavySeekBar.progress = targetMs.toFloat()
+        } catch (_: Exception) {}
+
+        activeLyricIndex = index
+        refreshLyricsHighlight(forceScroll = true, currentPosMs = targetMs.toLong())
+        updateTvSubtitleVisibility()
+    }
+
+    private fun renderLyricsLines(lines: List<LyricLine>, statusMessage: String?) {
+        if (!::lyricsLinesContainer.isInitialized) return
+        lyricsLinesContainer.removeAllViews()
+        if (lines.isEmpty()) {
+            val tvEmpty = TextView(this).apply {
+                text = "No existe la letra actualmente"
+                textSize = 12.5f
+                alpha = 0.78f
+                gravity = Gravity.CENTER
+                setPadding(16, 32, 16, 32)
+                applyContrastingText(currentTheme.isDark)
+                setOnClickListener { promptSetYoutubeLinkForLyrics() }
+            }
+            lyricsLinesContainer.addView(tvEmpty)
+            return
+        }
+
+        lines.forEachIndexed { idx, line ->
+            val row = KaraokeLineView(this).apply {
+                txtTime.text = LrcManager.formatTimestamp(line.timeMs)
+                txtLyric.text = line.text
+                txtTime.applyContrastingText(currentTheme.isDark)
+                txtLyric.applyContrastingText(currentTheme.isDark)
+                sweepColor = ColorUtils.setAlphaComponent(currentTheme.accent, 155)
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { setMargins(4, 5, 4, 5) }
+                setOnClickListener {
+                    seekToLyricLine(idx, line)
+                }
+            }
+            lyricsLinesContainer.addView(row)
+        }
+    }
+
+    private fun updateLyricsForPosition(positionMs: Int) {
+        if (currentLyrics.isEmpty()) return
+        val posLong = (positionMs.toLong() + currentLyricOffsetMs).coerceAtLeast(0L)
+        val newIdx = LrcManager.findActiveLineIndex(currentLyrics, posLong)
+        if (newIdx != activeLyricIndex) {
+            activeLyricIndex = newIdx
+            refreshLyricsHighlight(forceScroll = true, currentPosMs = posLong)
+            updateTvSubtitleVisibility()
+        } else if (newIdx in 0 until lyricsLinesContainer.childCount) {
+            val row = lyricsLinesContainer.getChildAt(newIdx) as? KaraokeLineView ?: return
+            val line = currentLyrics[newIdx]
+            val span = (line.endTimeMs - line.timeMs).coerceAtLeast(500L)
+            row.progressRatio = ((posLong - line.timeMs).toFloat() / span.toFloat()).coerceIn(0f, 1f)
+        }
+    }
+
+    private fun refreshLyricsHighlight(forceScroll: Boolean, currentPosMs: Long = (musicService?.getCurrentPosition() ?: 0).toLong()) {
+        if (!::lyricsLinesContainer.isInitialized || currentLyrics.isEmpty()) return
+        val count = lyricsLinesContainer.childCount
+
+        for (i in 0 until count) {
+            val row = lyricsLinesContainer.getChildAt(i) as? KaraokeLineView ?: continue
+            val line = currentLyrics.getOrNull(i) ?: continue
+            val isCurrent = (i == activeLyricIndex)
+
+            row.isCurrentLine = isCurrent
+            row.sweepColor = ColorUtils.setAlphaComponent(currentTheme.accent, 165)
+
+            if (isCurrent) {
+                val span = (line.endTimeMs - line.timeMs).coerceAtLeast(500L)
+                row.progressRatio = ((currentPosMs - line.timeMs).toFloat() / span.toFloat()).coerceIn(0f, 1f)
+
+                row.txtTime.setTextColor(Color.WHITE)
+                row.txtTime.alpha = 0.95f
+                row.txtLyric.textSize = 17f
+                row.txtLyric.typeface = Typeface.DEFAULT_BOLD
+                row.txtLyric.alpha = 1.0f
+                row.txtLyric.setTextColor(Color.WHITE)
+                row.txtLyric.setShadowLayer(8f, 0f, 0f, Color.BLACK)
+                row.animate().scaleX(1.02f).scaleY(1.02f).setDuration(120L).start()
+            } else {
+                row.progressRatio = 0f
+                row.txtLyric.textSize = 14f
+                row.txtLyric.typeface = Typeface.DEFAULT
+                row.txtLyric.setShadowLayer(0f, 0f, 0f, Color.TRANSPARENT)
+                row.scaleX = 1.0f
+                row.scaleY = 1.0f
+
+                val rowAlpha = when {
+                    activeLyricIndex < 0 -> 0.85f
+                    i < activeLyricIndex -> 0.42f
+                    else -> 0.72f
+                }
+                row.txtTime.alpha = rowAlpha * 0.8f
+                row.txtLyric.alpha = rowAlpha
+                row.txtTime.applyContrastingText(currentTheme.isDark)
+                row.txtLyric.applyContrastingText(currentTheme.isDark)
+            }
+        }
+        if (forceScroll && activeLyricIndex in 0 until count) {
+            val targetView = lyricsLinesContainer.getChildAt(activeLyricIndex)
+            lyricsScrollView.post {
+                val targetY = (targetView.top - (lyricsScrollView.height / 2) + (targetView.height / 2)).coerceAtLeast(0)
+                lyricsScrollView.smoothScrollTo(0, targetY)
+            }
+        }
+    }
+    private fun updateTvSubtitleVisibility() {
+        if (!::txtTvSubtitle.isInitialized) return
+        val currentText = if (activeLyricIndex in currentLyrics.indices) currentLyrics[activeLyricIndex].text else ""
+        if (isTvMode && isTvLyricsEnabled && currentText.isNotBlank()) {
+            txtTvSubtitle.text = currentText
+            txtTvSubtitle.visibility = View.VISIBLE
+        } else {
+            txtTvSubtitle.visibility = View.GONE
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
+        stopAudioVisualizer()
+        lyricsFetchJob?.cancel()
         releaseVideoPlayer()
         try { videoSurface?.release() } catch (_: Exception) {}
         videoSurface = null
@@ -2627,6 +4696,20 @@ class MainActivity : AppCompatActivity() {
                 insets
             }
             rootView.requestApplyInsets()
+        }
+    }
+
+    private fun solicitarExencionBateria() {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+            val pm = getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager
+            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                try {
+                    val intent = android.content.Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                        data = android.net.Uri.parse("package:$packageName")
+                    }
+                    startActivity(intent)
+                } catch (_: Exception) {}
+            }
         }
     }
 }

@@ -1,5 +1,8 @@
 package com.sdm.music
 
+import android.net.wifi.WifiManager
+import androidx.core.app.ServiceCompat
+
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -42,6 +45,44 @@ import java.net.URL
 import java.util.Collections
 
 class MusicPlaybackService : Service() {
+
+    private var rellyWakeLock: PowerManager.WakeLock? = null
+    private var rellyWifiLock: WifiManager.WifiLock? = null
+
+    private fun initRellyLocks() {
+        if (rellyWakeLock == null) {
+            val pm = getSystemService(android.content.Context.POWER_SERVICE) as PowerManager
+            rellyWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "RellyFi::PlaybackWakeLock").apply {
+                setReferenceCounted(false)
+            }
+        }
+        if (rellyWifiLock == null) {
+            val wm = applicationContext.getSystemService(android.content.Context.WIFI_SERVICE) as WifiManager
+            val mode = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+                WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+            } else {
+                @Suppress("DEPRECATION")
+                WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            }
+            rellyWifiLock = wm.createWifiLock(mode, "RellyFi::PlaybackWifiLock").apply {
+                setReferenceCounted(false)
+            }
+        }
+    }
+
+    private fun setRellyLocksActive(active: Boolean) {
+        try {
+            initRellyLocks()
+            if (active) {
+                if (rellyWakeLock?.isHeld == false) rellyWakeLock?.acquire(4 * 60 * 60 * 1000L)
+                if (rellyWifiLock?.isHeld == false) rellyWifiLock?.acquire()
+            } else {
+                if (rellyWakeLock?.isHeld == true) rellyWakeLock?.release()
+                if (rellyWifiLock?.isHeld == true) rellyWifiLock?.release()
+            }
+        } catch (_: Exception) {}
+    }
+
 
     companion object {
         const val CHANNEL_ID = "SDM_CHANNEL"
@@ -159,6 +200,7 @@ class MusicPlaybackService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        setRellyLocksActive(true)
         notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
@@ -195,7 +237,7 @@ class MusicPlaybackService : Service() {
             ACTION_NEXT -> playNext()
             ACTION_STOP -> stopAndClear()
         }
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder = binder
@@ -285,12 +327,20 @@ class MusicPlaybackService : Service() {
     }
 
     fun shuffleQueue() {
-        if (playlist.isEmpty()) return
+        if (playlist.size <= 1) return
         resetLoop()
-        playlist.shuffle()
-        currentIndex = 0
+        if (currentIndex in playlist.indices) {
+            val currentTrack = playlist[currentIndex]
+            val remaining = playlist.filterIndexed { idx, _ -> idx != currentIndex }.shuffled()
+            playlist.clear()
+            playlist.add(currentTrack)
+            playlist.addAll(remaining)
+            currentIndex = 0
+        } else {
+            playlist.shuffle()
+            currentIndex = 0
+        }
         listener?.onQueueUpdated(playlist, currentIndex)
-        playCurrentTrack()
     }
 
     fun moveQueueItem(fromPosition: Int, toPosition: Int) {
@@ -349,7 +399,7 @@ class MusicPlaybackService : Service() {
             val targetIndex = currentIndex
             streamResolveJob = serviceScope.launch(Dispatchers.IO) {
                 val directUrl = try {
-                    val req = YoutubeDLRequest(ytUrl).apply {
+                    val req = YoutubeDLRequest(ytUrl).also { getRellyAppContext()?.let { c -> prefetchLyricsForDownloadedTrack(c, ytUrl) } }.also { saveRellySourceUrl(ytUrl) }.apply {
                         addOption("--extractor-args", "youtube:player_client=android,web")
                         addOption("--no-playlist")
                         addOption("--no-warnings")
@@ -603,7 +653,7 @@ class MusicPlaybackService : Service() {
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
             )
         } else {
-            startForeground(NOTIFICATION_ID, notification)
+            ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK else 0)
         }
     }
 
@@ -704,7 +754,7 @@ class MusicPlaybackService : Service() {
                     .setMediaSession(mediaSession.sessionToken)
                     .setShowActionsInCompactView(0, 1, 2)
             )
-            .build()
+            .setOngoing(true).setOnlyAlertOnce(true).build()
     }
 
     private fun loadAlbumArtAsync(songPath: String) {
@@ -806,6 +856,7 @@ class MusicPlaybackService : Service() {
     }
 
     override fun onDestroy() {
+        setRellyLocksActive(false)
         super.onDestroy()
         handler.removeCallbacksAndMessages(null)
         serviceScope.cancel()
@@ -817,5 +868,81 @@ class MusicPlaybackService : Service() {
             mediaSession.isActive = false
             mediaSession.release()
         } catch (_: Exception) {}
+    }
+}
+
+
+private fun saveRellySourceUrl(rawUrl: String?, titleHint: String? = null) {
+    val url = rawUrl?.trim() ?: return
+    if (!url.contains("youtu")) return
+    try {
+        val baseDir = android.os.Environment.getExternalStorageDirectory()
+        val pkgDir = java.io.File(baseDir, "Android/data/com.sdm.music/files/Base-Lyrics").apply { mkdirs() }
+        val mapFile = java.io.File(pkgDir, ".sources.json")
+        val json = if (mapFile.exists()) {
+            try { org.json.JSONObject(mapFile.readText(Charsets.UTF_8)) } catch (_: Exception) { org.json.JSONObject() }
+        } else {
+            org.json.JSONObject()
+        }
+        val idMatch = Regex("(?:v=|youtu\\.be/|shorts/|embed/)([a-zA-Z0-9_-]{11})").find(url)
+        val vid = idMatch?.groupValues?.get(1) ?: ""
+        if (vid.isNotEmpty()) {
+            json.put("last_url", url)
+            json.put("vid_$vid", url)
+            if (!titleHint.isNullOrBlank()) {
+                json.put(titleHint.trim().lowercase(), url)
+            }
+            mapFile.writeText(json.toString(), Charsets.UTF_8)
+        }
+    } catch (_: Exception) {}
+}
+
+
+private fun prefetchLyricsForDownloadedTrack(context: android.content.Context, videoUrl: String?, titleHint: String? = null) {
+    val cleanUrl = videoUrl?.trim().orEmpty()
+    val cleanTitle = titleHint?.trim().orEmpty()
+    if (cleanUrl.isEmpty() && cleanTitle.isEmpty()) return
+    Thread {
+        try {
+            val baseDir = android.os.Environment.getExternalStorageDirectory()
+            val pkgDir = java.io.File(baseDir, "Android/data/com.sdm.music/files/Base-Lyrics").apply { mkdirs() }
+            if (cleanUrl.contains("youtu")) {
+                val mapFile = java.io.File(pkgDir, ".sources.json")
+                val json = if (mapFile.exists()) {
+                    try { org.json.JSONObject(mapFile.readText(Charsets.UTF_8)) } catch (_: Exception) { org.json.JSONObject() }
+                } else {
+                    org.json.JSONObject()
+                }
+                val idMatch = Regex("""(?:v=|youtu\.be/|shorts/|embed/)([a-zA-Z0-9_-]{11})""").find(cleanUrl)
+                val vid = idMatch?.groupValues?.get(1).orEmpty()
+                if (vid.isNotEmpty()) {
+                    json.put("last_url", cleanUrl)
+                    json.put("vid_$vid", cleanUrl)
+                }
+                if (cleanTitle.isNotEmpty()) {
+                    json.put(cleanTitle.lowercase(), cleanUrl)
+                }
+                mapFile.writeText(json.toString(), Charsets.UTF_8)
+            }
+            val safeName = (if (cleanTitle.isNotEmpty()) cleanTitle else cleanUrl.substringAfterLast("/"))
+                .replace(Regex("""[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ _-]"""), "")
+                .trim()
+            if (safeName.isNotEmpty()) {
+                val targetLrc = java.io.File(pkgDir, "$safeName.lrc")
+                if (!targetLrc.exists() || targetLrc.length() == 0L) {
+                    try { Class.forName("com.sdm.music.LrcManager") } catch (_: Exception) {}
+                }
+            }
+        } catch (_: Exception) {}
+    }.start()
+}
+
+private fun getRellyAppContext(): android.content.Context? {
+    return try {
+        val atClass = Class.forName("android.app.ActivityThread")
+        val app = atClass.getMethod("currentApplication").invoke(null) as? android.app.Application
+        app?.applicationContext
+    } catch (_: Exception) {
+        null
     }
 }

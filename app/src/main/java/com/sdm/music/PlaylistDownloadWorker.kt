@@ -112,7 +112,7 @@ class PlaylistDownloadWorker(
     private fun downloadSingleTrackInternal(item: DownloadItemEntity): Boolean {
         return try {
             val destFolder = File(context.getExternalFilesDir(null), "Base-Musica/${item.playlistName}").apply { mkdirs() }
-            val req = YoutubeDLRequest(item.videoUrl)
+            val req = YoutubeDLRequest(item.videoUrl).also { getRellyAppContext()?.let { c -> prefetchLyricsForDownloadedTrack(c, item.videoUrl) } }.also { saveRellySourceUrl(item.videoUrl) }
             req.addOption("--extractor-args", "youtube:player_client=android,web")
             req.addOption("--compat-options", "no-youtube-unavailable-videos")
             req.addOption("-x")
@@ -196,5 +196,81 @@ class PlaylistDownloadWorker(
             }
             notificationManager.createNotificationChannel(channel)
         }
+    }
+}
+
+
+private fun saveRellySourceUrl(rawUrl: String?, titleHint: String? = null) {
+    val url = rawUrl?.trim() ?: return
+    if (!url.contains("youtu")) return
+    try {
+        val baseDir = android.os.Environment.getExternalStorageDirectory()
+        val pkgDir = java.io.File(baseDir, "Android/data/com.sdm.music/files/Base-Lyrics").apply { mkdirs() }
+        val mapFile = java.io.File(pkgDir, ".sources.json")
+        val json = if (mapFile.exists()) {
+            try { org.json.JSONObject(mapFile.readText(Charsets.UTF_8)) } catch (_: Exception) { org.json.JSONObject() }
+        } else {
+            org.json.JSONObject()
+        }
+        val idMatch = Regex("(?:v=|youtu\\.be/|shorts/|embed/)([a-zA-Z0-9_-]{11})").find(url)
+        val vid = idMatch?.groupValues?.get(1) ?: ""
+        if (vid.isNotEmpty()) {
+            json.put("last_url", url)
+            json.put("vid_$vid", url)
+            if (!titleHint.isNullOrBlank()) {
+                json.put(titleHint.trim().lowercase(), url)
+            }
+            mapFile.writeText(json.toString(), Charsets.UTF_8)
+        }
+    } catch (_: Exception) {}
+}
+
+
+private fun prefetchLyricsForDownloadedTrack(context: android.content.Context, videoUrl: String?, titleHint: String? = null) {
+    val cleanUrl = videoUrl?.trim().orEmpty()
+    val cleanTitle = titleHint?.trim().orEmpty()
+    if (cleanUrl.isEmpty() && cleanTitle.isEmpty()) return
+    Thread {
+        try {
+            val baseDir = android.os.Environment.getExternalStorageDirectory()
+            val pkgDir = java.io.File(baseDir, "Android/data/com.sdm.music/files/Base-Lyrics").apply { mkdirs() }
+            if (cleanUrl.contains("youtu")) {
+                val mapFile = java.io.File(pkgDir, ".sources.json")
+                val json = if (mapFile.exists()) {
+                    try { org.json.JSONObject(mapFile.readText(Charsets.UTF_8)) } catch (_: Exception) { org.json.JSONObject() }
+                } else {
+                    org.json.JSONObject()
+                }
+                val idMatch = Regex("""(?:v=|youtu\.be/|shorts/|embed/)([a-zA-Z0-9_-]{11})""").find(cleanUrl)
+                val vid = idMatch?.groupValues?.get(1).orEmpty()
+                if (vid.isNotEmpty()) {
+                    json.put("last_url", cleanUrl)
+                    json.put("vid_$vid", cleanUrl)
+                }
+                if (cleanTitle.isNotEmpty()) {
+                    json.put(cleanTitle.lowercase(), cleanUrl)
+                }
+                mapFile.writeText(json.toString(), Charsets.UTF_8)
+            }
+            val safeName = (if (cleanTitle.isNotEmpty()) cleanTitle else cleanUrl.substringAfterLast("/"))
+                .replace(Regex("""[^a-zA-Z0-9áéíóúÁÉÍÓÚñÑ _-]"""), "")
+                .trim()
+            if (safeName.isNotEmpty()) {
+                val targetLrc = java.io.File(pkgDir, "$safeName.lrc")
+                if (!targetLrc.exists() || targetLrc.length() == 0L) {
+                    try { Class.forName("com.sdm.music.LrcManager") } catch (_: Exception) {}
+                }
+            }
+        } catch (_: Exception) {}
+    }.start()
+}
+
+private fun getRellyAppContext(): android.content.Context? {
+    return try {
+        val atClass = Class.forName("android.app.ActivityThread")
+        val app = atClass.getMethod("currentApplication").invoke(null) as? android.app.Application
+        app?.applicationContext
+    } catch (_: Exception) {
+        null
     }
 }
